@@ -54,6 +54,15 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             BackColor = System.Drawing.Color.FromArgb(0x0E, 0x11, 0x16),
         };
+        // Claim the grab-handle regions so clicks there reach MouseDown
+        // (detach) instead of starting a window drag. Everywhere else the
+        // surface stays transparent to hits and the form handles drag/resize.
+        _surface.HitTestOverride = p =>
+        {
+            foreach (var hr in HandleRects())
+                if (hr.Contains(p.X, p.Y)) return 1; // HTCLIENT
+            return 0;
+        };
         _surface.PaintSurface += OnPaintSurface;
         _surface.MouseMove += OnSurfaceMouseMove;
         _surface.MouseDown += OnSurfaceMouseDown;
@@ -179,6 +188,7 @@ public sealed class MainForm : Form
     private const int HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13;
     private const int HTTOPRIGHT = 14, HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
     private const int HTCAPTION = 2;
+    private const int HTCLIENT = 1;
 
     protected override void WndProc(ref Message m)
     {
@@ -186,6 +196,16 @@ public sealed class MainForm : Form
         {
             var pt = PointToClient(new System.Drawing.Point(
                 m.LParam.ToInt32() & 0xFFFF, m.LParam.ToInt32() >> 16));
+
+            // Over a grab handle, return HTCLIENT so Windows queries the child
+            // SKControl (which also returns HTCLIENT there via HitTestOverride),
+            // delivering the click to MouseDown for detach. Without this the
+            // form would answer HTCAPTION and start a window drag instead.
+            foreach (var hr in HandleRects())
+            {
+                if (hr.Contains(pt.X, pt.Y)) { m.Result = (IntPtr)HTCLIENT; return; }
+            }
+
             int w = ClientSize.Width;
             int h = ClientSize.Height;
             bool left = pt.X <= ResizeMargin;

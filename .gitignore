@@ -1,0 +1,14 @@
+## .NET build output
+bin/
+obj/
+
+## Rider / VS
+.vs/
+.idea/
+
+## NuGet
+*.user
+
+## OS
+Thumbs.db
+Desktop.ini

@@ -1,15 +1,21 @@
-\# feat: PCGauger — Windows-Native System Metrics Dashboard
+﻿\# feat: PCGauger — Windows-Native System Metrics Dashboard
 
-
+---
 
 \*\*Revised:\*\* 2026-07-18 (v3 — scoped to a buildable v1)
 
+---
 
+\## 0.1 Status (updated 2026-07-18)
 
-\---
+| Chunk | Scope | Status | Notes |
+|-------|-------|--------|-------|
+| Chunk 1 | CPU + RAM, real GUI, 60s history, top-process | Done | Committed 048194a. Live: CPU ~50% @ 3701MHz/12c, RAM 37%. Drag/resize works. |
+| Chunk 1.5 | GPU, Disk, Network, adaptive grid, detachable tiles | Mostly done | Committed 4dfbc08 (GPU/Disk/grid/detach) + 27ebcfb (grab-handle UX) + 8358834 (detach fix). Network deferred by user choice — not built yet. |
+| Chunk 2 | Kiosk mode, config persistence, themes, auto-start | Not started | |
+| Chunk 3 | Elevated sensor helper (temp/fan/voltage/SMART) | Not started | Separate initiative; out of scope until decided. |
 
-
-
+**Chunk 1.5 remaining:** NetworkProvider (GetIfTable2/GetIfEntry2, item 11) is the only unbuilt item. Items 12 (adaptive grid) and 13 (top-process-by-GPU) are done. Detach UX (grab handle to detach, click to re-attach) is working and verified.
 \## 0. What changed in this revision
 
 

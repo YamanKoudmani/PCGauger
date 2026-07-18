@@ -55,7 +55,8 @@ public sealed class MainForm : Form
             BackColor = System.Drawing.Color.FromArgb(0x0E, 0x11, 0x16),
         };
         _surface.PaintSurface += OnPaintSurface;
-        _surface.MouseDoubleClick += OnSurfaceDoubleClick;
+        _surface.MouseMove += OnSurfaceMouseMove;
+        _surface.MouseDown += OnSurfaceMouseDown;
         Controls.Add(_surface);
 
         _cpu = new CpuProvider();
@@ -113,26 +114,51 @@ public sealed class MainForm : Form
         _renderer.DrawDiskTile(c, r, pct, _disk.TotalBytes - _disk.FreeBytes, _disk.TotalBytes, _disk.BytesPerSec);
     }
 
-    // ---- Detach / re-attach ----
-    private void OnSurfaceDoubleClick(object? sender, MouseEventArgs e)
+    // ---- Detach / re-attach (grab handle only) ----
+    // Index of the tile whose grab handle the cursor is currently over, or -1.
+    // Drives the hover highlight and the SizeAll cursor affordance.
+    private int _hoverHandle = -1;
+
+    private List<SKRect> HandleRects()
     {
-        var tile = TileAt(e.Location);
-        if (tile != null) Detach(tile);
+        float gap = 12;
+        var area = new SKRect(gap, gap, ClientSize.Width - gap, ClientSize.Height - gap);
+        var rects = GridLayout.Compute(area, _tiles.Count, gap);
+        var handles = new List<SKRect>(_tiles.Count);
+        foreach (var r in rects) handles.Add(TileRenderer.GrabHandleRect(r));
+        return handles;
     }
 
-    private Tile? TileAt(System.Drawing.Point p)
+    private void OnSurfaceMouseMove(object? sender, MouseEventArgs e)
     {
-        var rects = GridLayout.Compute(new SKRect(0, 0, ClientSize.Width, ClientSize.Height), _tiles.Count, 12);
-        for (int i = 0; i < _tiles.Count; i++)
+        var handles = HandleRects();
+        int hit = -1;
+        for (int i = 0; i < handles.Count; i++)
         {
-            if (rects[i].Contains(p.X, p.Y)) return _tiles[i];
+            if (handles[i].Contains(e.Location.X, e.Location.Y)) { hit = i; break; }
         }
-        return null;
+        if (hit != _hoverHandle)
+        {
+            _hoverHandle = hit;
+            _surface.Cursor = hit >= 0 ? Cursors.SizeAll : Cursors.Default;
+            _surface.Invalidate();
+        }
+    }
+
+    private void OnSurfaceMouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        var handles = HandleRects();
+        for (int i = 0; i < handles.Count; i++)
+        {
+            if (handles[i].Contains(e.Location.X, e.Location.Y)) { Detach(_tiles[i]); return; }
+        }
     }
 
     private void Detach(Tile tile)
     {
         _tiles.Remove(tile);
+        _hoverHandle = -1;
         DetachedTileForm form = null!;
         form = new DetachedTileForm(tile, _theme, () => Reattach(tile, form));
         _detached.Add(form);
@@ -197,6 +223,9 @@ public sealed class MainForm : Form
         var rects = GridLayout.Compute(area, _tiles.Count, gap);
         for (int i = 0; i < _tiles.Count; i++)
             _tiles[i].Draw(canvas, rects[i]);
+        // Grab handles on top of each tile (hover-highlighted when active).
+        for (int i = 0; i < _tiles.Count; i++)
+            _renderer.DrawGrabHandle(canvas, rects[i], i == _hoverHandle);
 
         // Top-process footer line (only when there's room below the grid).
         var topSnap = _poller.GetSnapshot(typeof(TopProcessProvider));
@@ -245,22 +274,26 @@ public sealed class MainForm : Form
 }
 
 /// <summary>
-/// A standalone window hosting a single detached tile. Double-click re-attaches
-/// it to the main window (via the supplied callback); closing does the same.
+/// A standalone window hosting a single detached tile. Its grab handle
+/// re-attaches it to the main window on click; closing the window does the
+/// same. The handle is the only control, matching the main grid's UX.
 /// </summary>
 internal sealed class DetachedTileForm : Form
 {
     private readonly HitTestSurface _surface;
     private readonly Tile _tile;
+    private readonly TileRenderer _renderer;
     private readonly Theme _theme;
-    private readonly Action _onClose;
+    private readonly Action _onReattach;
+    private bool _hoverHandle;
     private readonly System.Threading.Timer _renderTimer;
 
-    public DetachedTileForm(Tile tile, Theme theme, Action onClose)
+    public DetachedTileForm(Tile tile, Theme theme, Action onReattach)
     {
         _tile = tile;
+        _renderer = new TileRenderer(theme);
         _theme = theme;
-        _onClose = onClose;
+        _onReattach = onReattach;
 
         Text = "PCGauger";
         ClientSize = new System.Drawing.Size(300, 220);
@@ -275,10 +308,38 @@ internal sealed class DetachedTileForm : Form
             BackColor = System.Drawing.Color.FromArgb(0x0E, 0x11, 0x16),
         };
         _surface.PaintSurface += OnPaintSurface;
-        _surface.MouseDoubleClick += (_, _) => Close();
+        _surface.MouseMove += OnSurfaceMouseMove;
+        _surface.MouseDown += OnSurfaceMouseDown;
         Controls.Add(_surface);
 
         _renderTimer = new System.Threading.Timer(_ => _surface.Invalidate(), null, 0, 33);
+    }
+
+    private SKRect TileRect()
+    {
+        float gap = 12;
+        return new SKRect(gap, gap, ClientSize.Width - gap, ClientSize.Height - gap);
+    }
+
+    private void OnSurfaceMouseMove(object? sender, MouseEventArgs e)
+    {
+        bool over = TileRenderer.GrabHandleRect(TileRect()).Contains(e.Location.X, e.Location.Y);
+        if (over != _hoverHandle)
+        {
+            _hoverHandle = over;
+            _surface.Cursor = over ? Cursors.SizeAll : Cursors.Default;
+            _surface.Invalidate();
+        }
+    }
+
+    private void OnSurfaceMouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left &&
+            TileRenderer.GrabHandleRect(TileRect()).Contains(e.Location.X, e.Location.Y))
+        {
+            _onReattach();
+            Close();
+        }
     }
 
     private void OnPaintSurface(object? sender, SKPaintSurfaceEventArgs e)
@@ -288,13 +349,14 @@ internal sealed class DetachedTileForm : Form
         int h = e.Info.Height;
         using (var bg = _theme.BackgroundPaint())
             canvas.DrawRect(0, 0, w, h, bg);
-        float gap = 12;
-        _tile.Draw(canvas, new SKRect(gap, gap, w - gap, h - gap));
+        var rect = TileRect();
+        _tile.Draw(canvas, rect);
+        _renderer.DrawGrabHandle(canvas, rect, _hoverHandle);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        _onClose();
+        _onReattach();
         base.OnFormClosing(e);
     }
 

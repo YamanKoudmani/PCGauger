@@ -138,6 +138,49 @@ public sealed class TileRenderer
 
     // ---- primitives ----
 
+    /// <summary>
+    /// The rectangle (in tile-local client space) occupied by a tile's grab
+    /// handle. Shared by rendering and hit-testing so they never drift apart.
+    /// The handle lives in the top-right corner, clear of the title.
+    /// </summary>
+    public static SKRect GrabHandleRect(SKRect tile)
+    {
+        float size = 26;
+        float inset = 14;
+        return new SKRect(tile.Right - inset - size, tile.Top + inset, tile.Right - inset, tile.Top + inset + size);
+    }
+
+    /// <summary>
+    /// Draws the per-tile grab handle: a 2x3 dot grip. On hover it gets a
+    /// rounded highlight and accent-colored dots so the detach affordance is
+    /// obvious. This is the only control for detaching a tile.
+    /// </summary>
+    public void DrawGrabHandle(SKCanvas canvas, SKRect tile, bool hover)
+    {
+        var r = GrabHandleRect(tile);
+        if (hover)
+        {
+            using var bg = new SKRoundRect(r, 6);
+            using var p = new SKPaint { Color = _theme.AccentSoft, Style = SKPaintStyle.Fill, IsAntialias = true };
+            canvas.DrawRoundRect(bg, p);
+        }
+
+        float cx0 = r.MidX - 4;
+        float cx1 = r.MidX + 4;
+        float cy0 = r.MidY - 6;
+        float cy1 = r.MidY;
+        float cy2 = r.MidY + 6;
+        using var dot = new SKPaint
+        {
+            Color = hover ? _theme.Accent : _theme.TextSecondary,
+            Style = SKPaintStyle.Fill,
+            IsAntialias = true,
+        };
+        float rad = 1.6f;
+        foreach (var (cx, cy) in new[] { (cx0, cy0), (cx1, cy0), (cx0, cy1), (cx1, cy1), (cx0, cy2), (cx1, cy2) })
+            canvas.DrawCircle(cx, cy, rad, dot);
+    }
+
     private void DrawCard(SKCanvas canvas, SKRect rect)
     {
         using var round = new SKRoundRect(rect, 14);

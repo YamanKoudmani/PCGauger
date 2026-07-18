@@ -9,31 +9,42 @@ using SkiaSharp.Views.Desktop;
 namespace PCGauger;
 
 /// <summary>
-/// Host window. Owns the SkiaSharp surface, the metric poller, and the rolling
-/// history buffers. The poller runs on a timer thread; rendering happens on the
-/// UI thread via the SKControl Paint event, which reads the latest snapshots.
+/// Host window. Owns the SkiaSharp surface, the metric poller(s), and the
+/// rolling history buffers. Tiles are laid out by an adaptive grid
+/// (GridLayout.Compute) and can be detached into their own window.
+///
+/// The poller runs on a timer thread; rendering happens on the UI thread via
+/// the SKControl Paint event, which reads the latest snapshots.
 /// </summary>
 public sealed class MainForm : Form
 {
     private readonly HitTestSurface _surface;
     private readonly MetricPoller _poller;
+    private readonly MetricPoller _memPoller;
     private readonly CpuProvider _cpu;
     private readonly MemoryProvider _mem;
     private readonly TopProcessProvider _top;
+    private readonly GpuProvider _gpu;
+    private readonly StorageProvider _disk;
     private readonly TileRenderer _renderer;
     private readonly Theme _theme = new();
     private readonly RollingHistory _cpuHistory = new(TimeSpan.FromSeconds(60));
     private readonly RollingHistory _memHistory = new(TimeSpan.FromSeconds(60));
+    private readonly RollingHistory _gpuHistory = new(TimeSpan.FromSeconds(60));
+    private readonly RollingHistory _diskHistory = new(TimeSpan.FromSeconds(60));
+
+    // Tiles currently shown in THIS window. Detaching removes one and opens a
+    // DetachedTileForm; closing that form re-attaches it here.
+    private readonly List<Tile> _tiles = new();
+    private readonly List<DetachedTileForm> _detached = new();
 
     private readonly System.Threading.Timer _renderTimer;
 
     public MainForm()
     {
         Text = "PCGauger";
-        // Reasonably sized for a small display; user drags it into place (v1).
-        ClientSize = new System.Drawing.Size(420, 520);
+        ClientSize = new System.Drawing.Size(420, 560);
         BackColor = System.Drawing.Color.FromArgb(0x0E, 0x11, 0x16);
-        // No title bar (user request) and not reachable via Alt-Tab (user request).
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterScreen;
@@ -44,33 +55,99 @@ public sealed class MainForm : Form
             BackColor = System.Drawing.Color.FromArgb(0x0E, 0x11, 0x16),
         };
         _surface.PaintSurface += OnPaintSurface;
+        _surface.MouseDoubleClick += OnSurfaceDoubleClick;
         Controls.Add(_surface);
 
         _cpu = new CpuProvider();
         _mem = new MemoryProvider();
         _top = new TopProcessProvider();
+        _gpu = new GpuProvider();
+        _disk = new StorageProvider();
         _renderer = new TileRenderer(_theme);
 
-        // CPU polled at 1s (smooth enough to read; raw 250ms deltas are too
-        // jumpy to be useful). RAM at 1s too. The provider applies an EMA so the
-        // displayed value is stable rather than flickering between samples.
-        _poller = new MetricPoller(new IMetricProvider[] { _cpu, _top }, TimeSpan.FromMilliseconds(1000));
-        var memPoller = new MetricPoller(new IMetricProvider[] { _mem }, TimeSpan.FromMilliseconds(1000));
-
+        _poller = new MetricPoller(new IMetricProvider[] { _cpu, _top, _gpu, _disk }, TimeSpan.FromMilliseconds(1000));
+        _memPoller = new MetricPoller(new IMetricProvider[] { _mem }, TimeSpan.FromMilliseconds(1000));
         _poller.Start();
-        memPoller.Start();
-        _memPollerRef = memPoller;
+        _memPoller.Start();
 
-        // Render at ~30fps; cheap and smooth enough for bars + sparklines.
+        // Initial tile set. Order here is the default grid order; the grid
+        // reflows automatically as tiles are added/removed.
+        _tiles.Add(new Tile(TileKind.Cpu, "CPU", DrawCpu));
+        _tiles.Add(new Tile(TileKind.Ram, "RAM", DrawRam));
+        _tiles.Add(new Tile(TileKind.Gpu, "GPU", DrawGpu));
+        _tiles.Add(new Tile(TileKind.Disk, "DISK", DrawDisk));
+
         _renderTimer = new System.Threading.Timer(_ => _surface.Invalidate(), null, 0, 33);
     }
 
-    private MetricPoller _memPollerRef;
+    // ---- Tile draw callbacks (bound to current snapshots) ----
+    private void DrawCpu(SKCanvas c, SKRect r)
+    {
+        var snap = _poller.GetSnapshot(typeof(CpuProvider));
+        double usage = MetricValue(snap, "cpu.aggregate");
+        _cpuHistory.Push(usage);
+        _renderer.DrawCpuTile(c, r, usage, _cpu.CurrentMhz, Environment.ProcessorCount, _cpuHistory.Snapshot());
+    }
+    private void DrawRam(SKCanvas c, SKRect r)
+    {
+        var snap = _memPoller.GetSnapshot(typeof(MemoryProvider));
+        double load = MetricValue(snap, "mem.load");
+        _memHistory.Push(load);
+        _renderer.SetRamHistory(_memHistory.Snapshot());
+        _renderer.DrawRamTile(c, r, load, _mem.UsedPhys, _mem.TotalPhys);
+    }
+    private void DrawGpu(SKCanvas c, SKRect r)
+    {
+        var snap = _poller.GetSnapshot(typeof(GpuProvider));
+        double util = MetricValue(snap, "gpu.util");
+        _gpuHistory.Push(util);
+        _renderer.SetGpuHistory(_gpuHistory.Snapshot());
+        _renderer.DrawGpuTile(c, r, util, _gpu.VramUsed, _gpu.VramBudget);
+    }
+    private void DrawDisk(SKCanvas c, SKRect r)
+    {
+        var snap = _poller.GetSnapshot(typeof(StorageProvider));
+        double pct = MetricValue(snap, "disk.load");
+        _diskHistory.Push(pct);
+        _renderer.SetDiskHistory(_diskHistory.Snapshot());
+        _renderer.DrawDiskTile(c, r, pct, _disk.TotalBytes - _disk.FreeBytes, _disk.TotalBytes, _disk.BytesPerSec);
+    }
+
+    // ---- Detach / re-attach ----
+    private void OnSurfaceDoubleClick(object? sender, MouseEventArgs e)
+    {
+        var tile = TileAt(e.Location);
+        if (tile != null) Detach(tile);
+    }
+
+    private Tile? TileAt(System.Drawing.Point p)
+    {
+        var rects = GridLayout.Compute(new SKRect(0, 0, ClientSize.Width, ClientSize.Height), _tiles.Count, 12);
+        for (int i = 0; i < _tiles.Count; i++)
+        {
+            if (rects[i].Contains(p.X, p.Y)) return _tiles[i];
+        }
+        return null;
+    }
+
+    private void Detach(Tile tile)
+    {
+        _tiles.Remove(tile);
+        DetachedTileForm form = null!;
+        form = new DetachedTileForm(tile, _theme, () => Reattach(tile, form));
+        _detached.Add(form);
+        form.Show();
+        _surface.Invalidate();
+    }
+
+    private void Reattach(Tile tile, DetachedTileForm form)
+    {
+        _detached.Remove(form);
+        if (!_tiles.Contains(tile)) _tiles.Add(tile);
+        _surface.Invalidate();
+    }
 
     // --- Borderless drag + resize ---
-    // With FormBorderStyle.None there's no caption bar to drag or edge to grab,
-    // so we handle WM_NCHITTEST ourselves: the window body drags, and a margin
-    // around the edges resizes. Keeps it movable/resizable without a title bar.
     private const int ResizeMargin = 8;
     private const int WM_NCHITTEST = 0x0084;
     private const int HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13;
@@ -81,8 +158,6 @@ public sealed class MainForm : Form
     {
         if (m.Msg == WM_NCHITTEST)
         {
-            // For a borderless form base.WndProc returns HTCLIENT everywhere, so
-            // we compute the hit region ourselves from the cursor position.
             var pt = PointToClient(new System.Drawing.Point(
                 m.LParam.ToInt32() & 0xFFFF, m.LParam.ToInt32() >> 16));
             int w = ClientSize.Width;
@@ -92,7 +167,7 @@ public sealed class MainForm : Form
             bool top = pt.Y <= ResizeMargin;
             bool bottom = pt.Y >= h - ResizeMargin;
 
-            int result = HTCAPTION; // default: drag the window
+            int result = HTCAPTION;
             if (top && left) result = HTTOPLEFT;
             else if (top && right) result = HTTOPRIGHT;
             else if (bottom && left) result = HTBOTTOMLEFT;
@@ -117,29 +192,14 @@ public sealed class MainForm : Form
         using (var bg = _theme.BackgroundPaint())
             canvas.DrawRect(0, 0, w, h, bg);
 
-        // Feed history buffers from current snapshots.
-        var cpuSnap = _poller.GetSnapshot(typeof(CpuProvider));
-        var memSnap = _memPollerRef.GetSnapshot(typeof(MemoryProvider));
+        float gap = 12;
+        var area = new SKRect(gap, gap, w - gap, h - gap);
+        var rects = GridLayout.Compute(area, _tiles.Count, gap);
+        for (int i = 0; i < _tiles.Count; i++)
+            _tiles[i].Draw(canvas, rects[i]);
+
+        // Top-process footer line (only when there's room below the grid).
         var topSnap = _poller.GetSnapshot(typeof(TopProcessProvider));
-
-        double cpuUsage = MetricValue(cpuSnap, "cpu.aggregate");
-        double memLoad = MetricValue(memSnap, "mem.load");
-
-        _cpuHistory.Push(cpuUsage);
-        _memHistory.Push(memLoad);
-        _renderer.SetRamHistory(_memHistory.Snapshot());
-
-        float pad = 12;
-        float tileH = (h - pad * 3) / 2f;
-        var cpuRect = new SKRect(pad, pad, w - pad, pad + tileH);
-        var memRect = new SKRect(pad, pad * 2 + tileH, w - pad, h - pad);
-
-        uint clock = _cpu.CurrentMhz;
-        int cores = Environment.ProcessorCount;
-        _renderer.DrawCpuTile(canvas, cpuRect, cpuUsage, clock, cores, _cpuHistory.Snapshot());
-        _renderer.DrawRamTile(canvas, memRect, memLoad, _mem.UsedPhys, _mem.TotalPhys);
-
-        // Top-process footer line.
         DrawTopProcessLine(canvas, w, h, topSnap);
     }
 
@@ -176,7 +236,73 @@ public sealed class MainForm : Form
         {
             _renderTimer.Dispose();
             _poller.Dispose();
-            _memPollerRef?.Dispose();
+            _memPoller.Dispose();
+            foreach (var d in _detached) d.Dispose();
+            _surface.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}
+
+/// <summary>
+/// A standalone window hosting a single detached tile. Double-click re-attaches
+/// it to the main window (via the supplied callback); closing does the same.
+/// </summary>
+internal sealed class DetachedTileForm : Form
+{
+    private readonly HitTestSurface _surface;
+    private readonly Tile _tile;
+    private readonly Theme _theme;
+    private readonly Action _onClose;
+    private readonly System.Threading.Timer _renderTimer;
+
+    public DetachedTileForm(Tile tile, Theme theme, Action onClose)
+    {
+        _tile = tile;
+        _theme = theme;
+        _onClose = onClose;
+
+        Text = "PCGauger";
+        ClientSize = new System.Drawing.Size(300, 220);
+        BackColor = System.Drawing.Color.FromArgb(0x0E, 0x11, 0x16);
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.CenterScreen;
+
+        _surface = new HitTestSurface
+        {
+            Dock = DockStyle.Fill,
+            BackColor = System.Drawing.Color.FromArgb(0x0E, 0x11, 0x16),
+        };
+        _surface.PaintSurface += OnPaintSurface;
+        _surface.MouseDoubleClick += (_, _) => Close();
+        Controls.Add(_surface);
+
+        _renderTimer = new System.Threading.Timer(_ => _surface.Invalidate(), null, 0, 33);
+    }
+
+    private void OnPaintSurface(object? sender, SKPaintSurfaceEventArgs e)
+    {
+        var canvas = e.Surface.Canvas;
+        int w = e.Info.Width;
+        int h = e.Info.Height;
+        using (var bg = _theme.BackgroundPaint())
+            canvas.DrawRect(0, 0, w, h, bg);
+        float gap = 12;
+        _tile.Draw(canvas, new SKRect(gap, gap, w - gap, h - gap));
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        _onClose();
+        base.OnFormClosing(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _renderTimer.Dispose();
             _surface.Dispose();
         }
         base.Dispose(disposing);

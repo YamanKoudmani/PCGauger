@@ -77,6 +77,65 @@ public sealed class TileRenderer
     private IReadOnlyList<(DateTimeOffset, double)> _ramHistory = Array.Empty<(DateTimeOffset, double)>();
     public void SetRamHistory(IReadOnlyList<(DateTimeOffset, double)> history) => _ramHistory = history;
 
+    private IReadOnlyList<(DateTimeOffset, double)> _gpuHistory = Array.Empty<(DateTimeOffset, double)>();
+    public void SetGpuHistory(IReadOnlyList<(DateTimeOffset, double)> history) => _gpuHistory = history;
+
+    private IReadOnlyList<(DateTimeOffset, double)> _diskHistory = Array.Empty<(DateTimeOffset, double)>();
+    public void SetDiskHistory(IReadOnlyList<(DateTimeOffset, double)> history) => _diskHistory = history;
+
+    public void DrawGpuTile(SKCanvas canvas, SKRect rect, double utilPct, ulong vramUsed, ulong vramBudget)
+    {
+        DrawCard(canvas, rect);
+        float pad = 16;
+        float x = rect.Left + pad;
+        float y = rect.Top + pad;
+        float w = rect.Width - pad * 2;
+
+        DrawTitle(canvas, x, y, "GPU");
+        y += 30;
+
+        DrawBigValue(canvas, x, y, $"{utilPct:0.#}", "%");
+        y += 56;
+
+        DrawBar(canvas, x, y, w, utilPct / 100.0);
+        y += 22;
+
+        float sparkBottom = rect.Bottom - pad;
+        float sparkTop = sparkBottom - MinSparklineHeight;
+        if (sparkTop < y + 4) sparkTop = y + 4;
+        DrawSparkline(canvas, new SKRect(x, sparkTop, rect.Right - pad, sparkBottom), _gpuHistory, 0, 100);
+
+        string vram = vramBudget > 0
+            ? $"{Format.Bytes(vramUsed)} / {Format.Bytes(vramBudget)}"
+            : Format.Bytes(vramUsed);
+        DrawSecondary(canvas, x, sparkTop - 18, vram);
+    }
+
+    public void DrawDiskTile(SKCanvas canvas, SKRect rect, double usagePct, ulong used, ulong total, double bytesPerSec)
+    {
+        DrawCard(canvas, rect);
+        float pad = 16;
+        float x = rect.Left + pad;
+        float y = rect.Top + pad;
+        float w = rect.Width - pad * 2;
+
+        DrawTitle(canvas, x, y, "DISK");
+        y += 30;
+
+        DrawBigValue(canvas, x, y, $"{usagePct:0.#}", "%");
+        y += 56;
+
+        DrawBar(canvas, x, y, w, usagePct / 100.0);
+        y += 22;
+
+        float sparkBottom = rect.Bottom - pad;
+        float sparkTop = sparkBottom - MinSparklineHeight;
+        if (sparkTop < y + 4) sparkTop = y + 4;
+        DrawSparkline(canvas, new SKRect(x, sparkTop, rect.Right - pad, sparkBottom), _diskHistory, 0, 100);
+
+        DrawSecondary(canvas, x, sparkTop - 18, $"{Format.Bytes(used)} / {Format.Bytes(total)}   •   {Format.Bytes((ulong)bytesPerSec)}/s");
+    }
+
     // ---- primitives ----
 
     private void DrawCard(SKCanvas canvas, SKRect rect)

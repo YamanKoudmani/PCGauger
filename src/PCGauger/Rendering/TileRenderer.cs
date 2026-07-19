@@ -285,6 +285,34 @@ public sealed class TileRenderer
         => DrawGearAt(canvas, GearRect(tile), hover, accent);
 
     /// <summary>
+    /// Draws a close "×" at an arbitrary rectangle (footer status bar). Non-hover:
+    /// muted secondary ×. Hover: red rounded background with a white × — the
+    /// universal close affordance, legible on both dark and light themes.
+    /// </summary>
+    public void DrawCloseAt(SKCanvas canvas, SKRect r, bool hover)
+    {
+        if (hover)
+        {
+            using var bg = new SKRoundRect(r, 6);
+            using var p = new SKPaint { Color = new SKColor(0xC4, 0x2B, 0x1C), Style = SKPaintStyle.Fill, IsAntialias = true };
+            canvas.DrawRoundRect(bg, p);
+        }
+
+        float arm = r.Width * 0.24f; // half-length of each × arm
+        float cx = r.MidX, cy = r.MidY;
+        using var paint = new SKPaint
+        {
+            Color = hover ? SKColors.White : _theme.TextSecondary,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1.8f,
+            StrokeCap = SKStrokeCap.Round,
+            IsAntialias = true,
+        };
+        canvas.DrawLine(cx - arm, cy - arm, cx + arm, cy + arm, paint);
+        canvas.DrawLine(cx - arm, cy + arm, cx + arm, cy - arm, paint);
+    }
+
+    /// <summary>
     /// Draws a settings COG at an arbitrary rectangle (used for both tile
     /// corners and the footer status-bar gear): 8 chunky trapezoid teeth around
     /// a solid ring with a visible center hole (donut). Hover highlight + accent

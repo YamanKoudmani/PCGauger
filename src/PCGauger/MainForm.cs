@@ -59,6 +59,7 @@ public sealed class MainForm : Form
     // Global settings pane state.
     private bool _globalPaneOpen;
     private bool _hoverFooterGear;
+    private bool _hoverFooterClose;
     private bool _hoverGlobalClose;
     private int _globalHoverRow = -1;
 
@@ -88,6 +89,7 @@ public sealed class MainForm : Form
         // Apply persisted theme + units + threshold before building anything.
         _theme = Theme.FromName(_config.ThemeName);
         Format.Units = _config.Units;
+        Format.ValueDecimals = _config.ValueDecimals;
         TileRenderer.ThresholdEnabled = _config.ThresholdEnabled;
         TileRenderer.ThresholdPercent = _config.ThresholdPercent;
 
@@ -306,8 +308,15 @@ public sealed class MainForm : Form
     private List<SKRect> HandleRects() => TileRects().Select(TileRenderer.GrabHandleRect).ToList();
     private List<SKRect> GearRects() => TileRects().Select(TileRenderer.GearRect).ToList();
 
-    /// <summary>The footer-gear hit rect: a 24px square at the far right of the status band.</summary>
+    /// <summary>The footer-gear hit rect: a 22px square in the status band, left of the close button.</summary>
     private SKRect FooterGearRect()
+    {
+        var c = FooterCloseRect();
+        return new SKRect(c.Left - c.Width - 6, c.Top, c.Left - 6, c.Bottom);
+    }
+
+    /// <summary>The footer close hit rect: a 22px square at the far right of the status band.</summary>
+    private SKRect FooterCloseRect()
     {
         float size = 22;
         float y = ClientSize.Height - FooterHeight + (FooterHeight - size) / 2f;
@@ -335,6 +344,7 @@ public sealed class MainForm : Form
         foreach (var g in GearRects())
             if (g.Contains(p.X, p.Y)) return 1;
         if (FooterGearRect().Contains(p.X, p.Y)) return 1;
+        if (FooterCloseRect().Contains(p.X, p.Y)) return 1;
 
         if (_openPaneTile != null)
         {
@@ -382,6 +392,13 @@ public sealed class MainForm : Form
                 HandleGlobalPaneClick(g, e.Location);
                 return;
             }
+        }
+
+        // 3a) Footer close button exits the app.
+        if (FooterCloseRect().Contains(e.Location.X, e.Location.Y))
+        {
+            Close();
+            return;
         }
 
         // 3) Footer gear toggles the global pane.
@@ -492,6 +509,7 @@ public sealed class MainForm : Form
             }
         }
         bool footerGearHit = FooterGearRect().Contains(e.Location.X, e.Location.Y);
+        bool footerCloseHit = FooterCloseRect().Contains(e.Location.X, e.Location.Y);
         if (_globalPaneOpen)
         {
             var g = GlobalPaneLayout();
@@ -513,13 +531,14 @@ public sealed class MainForm : Form
         if (closeHit != _hoverPaneClose) { _hoverPaneClose = closeHit; changed = true; }
         if (swatchHit != _hoverSwatch) { _hoverSwatch = swatchHit; changed = true; }
         if (footerGearHit != _hoverFooterGear) { _hoverFooterGear = footerGearHit; changed = true; }
+        if (footerCloseHit != _hoverFooterClose) { _hoverFooterClose = footerCloseHit; changed = true; }
         if (globalCloseHit != _hoverGlobalClose) { _hoverGlobalClose = globalCloseHit; changed = true; }
         if (globalRow != _globalHoverRow) { _globalHoverRow = globalRow; changed = true; }
 
         if (changed)
         {
             bool hand = gearHit >= 0 || _hoverPaneClose || _hoverSwatch >= 0 || footerGearHit
-                || _hoverGlobalClose || _globalHoverRow >= 0;
+                || footerCloseHit || _hoverGlobalClose || _globalHoverRow >= 0;
             _surface.Cursor = (_hoverHandle >= 0) ? Cursors.SizeAll : (hand ? Cursors.Hand : Cursors.Default);
             _surface.Invalidate();
         }
@@ -924,12 +943,13 @@ public sealed class MainForm : Form
     private void ClearHandleHover()
     {
         if (_hoverHandle == -1 && _hoverGear == -1 && !_hoverPaneClose && _hoverSwatch == -1
-            && !_hoverFooterGear && !_hoverGlobalClose && _globalHoverRow == -1) return;
+            && !_hoverFooterGear && !_hoverFooterClose && !_hoverGlobalClose && _globalHoverRow == -1) return;
         _hoverHandle = -1;
         _hoverGear = -1;
         _hoverPaneClose = false;
         _hoverSwatch = -1;
         _hoverFooterGear = false;
+        _hoverFooterClose = false;
         _hoverGlobalClose = false;
         _globalHoverRow = -1;
         _surface.Cursor = Cursors.Default;
@@ -1131,6 +1151,7 @@ public sealed class MainForm : Form
 
         // Footer gear at far right.
         _renderer.DrawGearAt(canvas, FooterGearRect(), _hoverFooterGear, _theme.Accent);
+        _renderer.DrawCloseAt(canvas, FooterCloseRect(), _hoverFooterClose);
     }
 
     private static double MetricValue(IReadOnlyList<Metric> snap, string key)

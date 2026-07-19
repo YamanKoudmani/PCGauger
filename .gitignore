@@ -12,3 +12,6 @@ obj/
 ## OS
 Thumbs.db
 Desktop.ini
+
+publish/
+*.zip

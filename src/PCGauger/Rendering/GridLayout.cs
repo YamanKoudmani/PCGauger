@@ -13,6 +13,7 @@ public enum TileKind
     Ram,
     Gpu,
     Disk,
+    Network,
 }
 
 /// <summary>
@@ -25,6 +26,12 @@ public sealed class Tile
     public TileKind Kind { get; }
     public string Title { get; }
     public Action<SKCanvas, SKRect> Draw { get; }
+
+    /// <summary>
+    /// Per-tile appearance/content state. Travels with the tile when it is
+    /// detached, since it lives here.
+    /// </summary>
+    public TileSettings Settings { get; } = new();
 
     public Tile(TileKind kind, string title, Action<SKCanvas, SKRect> draw)
     {

@@ -34,8 +34,11 @@ internal sealed class HitTestSurface : SKControl
             var hit = HitTestOverride;
             if (hit != null)
             {
+                // Sign-extend: screen coords can be negative on multi-monitor
+                // setups (e.g. the mini panel left of/above the primary).
+                int lp = m.LParam.ToInt32();
                 var pt = PointToClient(new System.Drawing.Point(
-                    m.LParam.ToInt32() & 0xFFFF, m.LParam.ToInt32() >> 16));
+                    (short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
                 int code = hit(pt);
                 if (code != 0) { m.Result = (IntPtr)code; return; }
             }

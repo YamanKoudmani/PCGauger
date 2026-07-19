@@ -15,7 +15,7 @@ namespace PCGauger.Metrics.Providers;
 /// between Update calls so each poll is a delta, not an absolute reading.
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class CpuProvider : IMetricProvider
+public sealed class CpuProvider : IMetricProvider, IDisposable
 {
     private readonly int _coreCount = Environment.ProcessorCount;
     private ulong _prevTotal;
@@ -30,6 +30,18 @@ public sealed class CpuProvider : IMetricProvider
     private uint _maxMhz;
     private uint _currentMhz;
 
+    // PDH counter for dynamic clock: "% Processor Performance" of _Total is the
+    // current performance relative to the nominal/max frequency, so
+    // CurrentMhz = MaxMhz * pct / 100. This tracks turbo like Task Manager's
+    // "Speed" instead of the static value CallNtPowerInformation reports.
+    private IntPtr _perfQuery;
+    private IntPtr _perfCounter;
+
+    // Real topology (computed once, cached). LogicalProcessors is the logical
+    // count; PhysicalCores counts RelationProcessorCore records.
+    private readonly int _logicalProcessors = Environment.ProcessorCount;
+    private readonly int _physicalCores;
+
     // Exponential moving average smoothing factor (0..1). Lower = smoother /
     // slower to react. 0.25 keeps the displayed CPU stable instead of flickering
     // between 1s samples, which the user found too jumpy at fast cadences.
@@ -41,12 +53,59 @@ public sealed class CpuProvider : IMetricProvider
         _prevCoreIdle = new ulong[_coreCount];
         _coreUsage = new double[_coreCount];
         _coreMhz = new uint[_coreCount];
+        _physicalCores = CountPhysicalCores();
+
+        if (NativeMethods.PdhOpenQuery(null, IntPtr.Zero, out _perfQuery) == 0)
+        {
+            if (NativeMethods.PdhAddCounter(_perfQuery, @"\Processor Information(_Total)\% Processor Performance", IntPtr.Zero, out _perfCounter) != 0)
+                _perfCounter = IntPtr.Zero;
+        }
+    }
+
+    private static int CountPhysicalCores()
+    {
+        try
+        {
+            uint length = 0;
+            // First call: get required buffer size (returns false, sets last
+            // error ERROR_INSUFFICIENT_BUFFER = 122).
+            NativeMethods.GetLogicalProcessorInformation(IntPtr.Zero, ref length);
+            if (length == 0) return Environment.ProcessorCount;
+
+            IntPtr buffer = Marshal.AllocHGlobal((int)length);
+            try
+            {
+                if (!NativeMethods.GetLogicalProcessorInformation(buffer, ref length))
+                    return Environment.ProcessorCount;
+
+                int stride = Marshal.SizeOf<NativeMethods.SYSTEM_LOGICAL_PROCESSOR_INFORMATION>();
+                int count = (int)(length / stride);
+                int cores = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    var info = Marshal.PtrToStructure<NativeMethods.SYSTEM_LOGICAL_PROCESSOR_INFORMATION>(
+                        IntPtr.Add(buffer, i * stride));
+                    if (info.Relationship == (uint)NativeMethods.LOGICAL_PROCESSOR_RELATIONSHIP.RelationProcessorCore)
+                        cores++;
+                }
+                return cores > 0 ? cores : Environment.ProcessorCount;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+        catch
+        {
+            return Environment.ProcessorCount;
+        }
     }
 
     public void Update(TimeSpan elapsed)
     {
         UpdateAggregate();
         UpdatePerCore();
+        UpdateClock();
     }
 
     private void UpdateAggregate()
@@ -134,11 +193,45 @@ public sealed class CpuProvider : IMetricProvider
         }
     }
 
+    private void UpdateClock()
+    {
+        // Dynamic clock via PDH "% Processor Performance" of _Total.
+        // CurrentMhz = MaxMhz * pct / 100. Values may exceed MaxMhz under turbo
+        // — that is correct, so do NOT clamp.
+        bool dynamic = false;
+        if (_perfCounter != IntPtr.Zero && _maxMhz > 0)
+        {
+            try
+            {
+                if (NativeMethods.PdhCollectQueryData(_perfQuery) == 0)
+                {
+                    int hr = NativeMethods.PdhGetFormattedCounterValue(
+                        _perfCounter, NativeMethods.PDH_FMT_DOUBLE, out _, out var val);
+                    if (hr == 0 && val.CStatus == 0)
+                    {
+                        double pct = val.DoubleValue;
+                        _currentMhz = (uint)Math.Round(_maxMhz * pct / 100.0);
+                        dynamic = true;
+                    }
+                }
+            }
+            catch
+            {
+                dynamic = false;
+            }
+        }
+
+        // Fallback: keep the static CallNtPowerInformation value already in
+        // _currentMhz (set by UpdatePerCore). Nothing to do if dynamic failed.
+        _ = dynamic;
+    }
+
     public IEnumerable<Metric> GetMetrics()
     {
         yield return Metric.Gauge("cpu.aggregate", "CPU", _aggregateUsage, "%");
         yield return Metric.Text("cpu.clock", "Clock", _currentMhz, "MHz");
-        yield return Metric.Text("cpu.cores", "Cores", _coreCount, "");
+        yield return Metric.Text("cpu.cores", "Cores", _physicalCores, "");
+        yield return Metric.Text("cpu.threads", "Threads", _logicalProcessors, "");
         // Per-core usage exposed for potential future rendering; not shown in v1 tiles.
         for (int i = 0; i < _coreCount; i++)
         {
@@ -149,5 +242,13 @@ public sealed class CpuProvider : IMetricProvider
     public double AggregateUsage => _aggregateUsage;
     public uint CurrentMhz => _currentMhz;
     public uint MaxMhz => _maxMhz;
+    public int PhysicalCores => _physicalCores;
+    public int LogicalProcessors => _logicalProcessors;
     public IReadOnlyList<double> CoreUsage => _coreUsage;
+
+    public void Dispose()
+    {
+        if (_perfCounter != IntPtr.Zero) NativeMethods.PdhRemoveCounter(_perfCounter);
+        if (_perfQuery != IntPtr.Zero) NativeMethods.PdhCloseQuery(_perfQuery);
+    }
 }

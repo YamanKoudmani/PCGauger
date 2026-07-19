@@ -73,6 +73,32 @@ internal static class NativeMethods
         IntPtr outputBuffer,
         uint outputBufferLength);
 
+    // ---- CPU: logical processor topology ----
+    public enum LOGICAL_PROCESSOR_RELATIONSHIP : uint
+    {
+        RelationProcessorCore = 0,
+        RelationNumaNode = 1,
+        RelationCache = 2,
+        RelationProcessorPackage = 3,
+        RelationGroup = 4,
+        RelationAll = 0xFFFF,
+    }
+
+    // Canonical x64 layout: ProcessorMask (8) + Relationship (4) + 8-byte union
+    // payload (flags/numa/cache/group) + 4-byte padding -> 24 bytes.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SYSTEM_LOGICAL_PROCESSOR_INFORMATION
+    {
+        public UIntPtr ProcessorMask;
+        public uint Relationship;
+        public ulong Payload; // union: flags (core), NumaNode, Cache, Group
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetLogicalProcessorInformation(
+        IntPtr buffer,
+        ref uint returnedLength);
+
     // ---- Memory ----
     [StructLayout(LayoutKind.Sequential)]
     public struct MEMORYSTATUSEX
@@ -136,15 +162,19 @@ internal static class NativeMethods
         public PDH_FMT_COUNTERVALUE FmtValue;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
+    // Real layout: DWORD CStatus followed by an 8-byte UNION of the value
+    // types (16 bytes total on x64). Must be Explicit with overlaps — the
+    // previous sequential declaration over-sized the struct (40 bytes),
+    // inflating the PDH_FMT_COUNTERVALUE_ITEM_W array stride (48 vs 24), so
+    // every array walk read misaligned garbage pointers: fatal
+    // AccessViolationException in Marshal.PtrToStringUni on the poll thread.
+    [StructLayout(LayoutKind.Explicit)]
     public struct PDH_FMT_COUNTERVALUE
     {
-        public int CStatus;
-        public double DoubleValue;
-        public long LongValue;
-        public long LargeValue;
-        public int AnsiStringLength;
-        public int WideStringLength;
+        [FieldOffset(0)] public int CStatus;
+        [FieldOffset(8)] public double DoubleValue;
+        [FieldOffset(8)] public int LongValue;
+        [FieldOffset(8)] public long LargeValue;
     }
 
     // ---- DXGI for VRAM (IDXGIAdapter3::QueryVideoMemoryInfo) ----

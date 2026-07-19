@@ -71,4 +71,3 @@ dotnet publish src/PCGauger -c Release -r win-x64 --self-contained
 
 Possible future work (tracked in `docs/plans/`): an optional elevated sensor helper process for temperatures, fan RPM, voltages, and SMART data — kept isolated in its own exe so the main app stays unprivileged.
 
-Explicit non-goals: client/server, remote monitoring, companion apps.

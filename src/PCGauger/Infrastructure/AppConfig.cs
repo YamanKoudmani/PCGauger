@@ -5,18 +5,20 @@ using SkiaSharp;
 namespace PCGauger.Infrastructure;
 
 /// <summary>
-/// Display units mode for byte values. Auto = current adaptive scaling.
+/// Per-tile byte-display mode. Auto = sensible per-kind default (Network shows
+/// bits/throughput, other tiles show bytes); Bits forces a bits axis (Mbps/Gbps);
+/// Bytes forces a bytes axis (MB/s/GB/s). Magnitude auto-scales in every mode.
 /// </summary>
-public enum UnitsMode
+public enum TileUnitMode
 {
     Auto,
-    MB,
-    GB,
+    Bits,
+    Bytes,
 }
 
 /// <summary>
 /// Per-tile persisted settings: accent override (ARGB, null = use kind default)
-/// plus the five Show* flags. Serialized per TileKind.
+/// plus the five Show* flags and the unit mode. Serialized per TileKind.
 /// </summary>
 public sealed class TileConfig
 {
@@ -26,6 +28,7 @@ public sealed class TileConfig
     public bool ShowUsageBar { get; set; } = true;
     public bool ShowSparkline { get; set; } = true;
     public bool ShowSecondaryLine { get; set; } = true;
+    public TileUnitMode UnitMode { get; set; } = TileUnitMode.Auto;
     // Default true: an existing config.json without this key must deserialize as
     // enabled (a missing entry means "shown", never "hidden").
     public bool Enabled { get; set; } = true;
@@ -37,6 +40,7 @@ public sealed class TileConfig
         s.ShowUsageBar = ShowUsageBar;
         s.ShowSparkline = ShowSparkline;
         s.ShowSecondaryLine = ShowSecondaryLine;
+        s.UnitMode = UnitMode;
         s.AccentColor = AccentArgb.HasValue
             ? new SKColor((byte)(AccentArgb.Value >> 24), (byte)(AccentArgb.Value >> 16), (byte)(AccentArgb.Value >> 8), (byte)AccentArgb.Value)
             : null;
@@ -52,6 +56,7 @@ public sealed class TileConfig
         ShowUsageBar = s.ShowUsageBar,
         ShowSparkline = s.ShowSparkline,
         ShowSecondaryLine = s.ShowSecondaryLine,
+        UnitMode = s.UnitMode,
         Enabled = true,
     };
 }
@@ -70,7 +75,6 @@ public sealed class AppConfig
     private static readonly string FilePath = Path.Combine(DirectoryPath, "config.json");
 
     public string ThemeName { get; set; } = "Midnight";
-    public UnitsMode Units { get; set; } = UnitsMode.Auto;
     public bool LaunchAtStartup { get; set; }
     public bool AlwaysOnTop { get; set; }
     public bool KioskMode { get; set; }

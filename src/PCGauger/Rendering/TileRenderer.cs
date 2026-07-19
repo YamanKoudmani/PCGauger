@@ -30,6 +30,10 @@ public sealed class TileRenderer
     private const float AffordanceSize = 24;
     private const float AffordanceInset = 14;
 
+    // Inner content inset for a tile body (left/right/top/bottom). Smaller =
+    // content sits closer to the card edges with less wasted space.
+    public const float TilePad = 10;
+
     // Settings pane geometry (compact popover; fits 5 toggles + 12 swatches +
     // Custom/Reset on one row). Clamped to the host window, not the tile.
     private const float PanePad = 12;
@@ -62,7 +66,7 @@ public sealed class TileRenderer
     public void DrawCpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, uint clockMhz, int physicalCores, int logicalProcessors, IReadOnlyList<(DateTimeOffset, double)> history, TimeSpan historyWindow)
     {
         bool alert = ThresholdEnabled && usagePct >= ThresholdPercent;
-        var v = new TileVisual(TileKind.Cpu, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + 16, SparkWindowSeconds = historyWindow.TotalSeconds };
+        var v = new TileVisual(TileKind.Cpu, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = historyWindow.TotalSeconds };
         DrawCard(canvas, rect);
         DrawTitle(canvas, v, "CPU");
         DrawBigValue(canvas, v, usagePct, "%");
@@ -75,13 +79,13 @@ public sealed class TileRenderer
     public void DrawRamTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, ulong used, ulong total)
     {
         bool alert = ThresholdEnabled && usagePct >= ThresholdPercent;
-        var v = new TileVisual(TileKind.Ram, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + 16, SparkWindowSeconds = _ramWindowSeconds };
+        var v = new TileVisual(TileKind.Ram, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _ramWindowSeconds };
         DrawCard(canvas, rect);
         DrawTitle(canvas, v, "RAM");
         DrawBigValue(canvas, v, usagePct, "%");
         DrawBar(canvas, v, usagePct / 100.0);
         DrawSparkline(canvas, v, _ramHistory, false);
-        DrawSecondary(canvas, v, $"{Format.Bytes(used)} / {Format.Bytes(total)}");
+        DrawSecondary(canvas, v, $"{Format.Size(used, s.UnitMode, TileKind.Ram)} / {Format.Size(total, s.UnitMode, TileKind.Ram)}");
         v.Finish(canvas, this);
     }
 
@@ -105,15 +109,15 @@ public sealed class TileRenderer
     public void DrawGpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double utilPct, ulong vramUsed, ulong vramBudget)
     {
         bool alert = ThresholdEnabled && utilPct >= ThresholdPercent;
-        var v = new TileVisual(TileKind.Gpu, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + 16, SparkWindowSeconds = _gpuWindowSeconds };
+        var v = new TileVisual(TileKind.Gpu, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _gpuWindowSeconds };
         DrawCard(canvas, rect);
         DrawTitle(canvas, v, "GPU");
         DrawBigValue(canvas, v, utilPct, "%");
         DrawBar(canvas, v, utilPct / 100.0);
         DrawSparkline(canvas, v, _gpuHistory, false);
         string vram = vramBudget > 0
-            ? $"{Format.Bytes(vramUsed)} / {Format.Bytes(vramBudget)}"
-            : Format.Bytes(vramUsed);
+            ? $"{Format.Size(vramUsed, s.UnitMode, TileKind.Gpu)} / {Format.Size(vramBudget, s.UnitMode, TileKind.Gpu)}"
+            : Format.Size(vramUsed, s.UnitMode, TileKind.Gpu);
         DrawSecondary(canvas, v, vram);
         v.Finish(canvas, this);
     }
@@ -141,14 +145,14 @@ public sealed class TileRenderer
     public void DrawDiskTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, ulong used, ulong total, double bytesPerSec)
     {
         bool alert = ThresholdEnabled && usagePct >= ThresholdPercent;
-        var v = new TileVisual(TileKind.Disk, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + 16, SparkWindowSeconds = _diskWindowSeconds };
+        var v = new TileVisual(TileKind.Disk, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _diskWindowSeconds };
         DrawCard(canvas, rect);
         DrawTitle(canvas, v, "DISK");
-        DrawBigValue(canvas, v, usagePct, "%");
+        DrawBigValue(canvas, v, usagePct, "% used");
         DrawBar(canvas, v, usagePct / 100.0);
         // Dual graph: write (accent) + read (blue) throughput in one sparkline.
         DrawSparkline(canvas, v, _diskWriteHistory, true, _diskReadHistory, TilePalette.DiskRead, "W", "R");
-        DrawSecondary(canvas, v, $"{Format.Bytes(used)} / {Format.Bytes(total)}   •   {Format.Bytes((ulong)bytesPerSec)}/s");
+        DrawSecondary(canvas, v, $"{Format.Size(used, s.UnitMode, TileKind.Disk)} / {Format.Size(total, s.UnitMode, TileKind.Disk)}   •   {Format.Rate((ulong)bytesPerSec, s.UnitMode, TileKind.Disk)}");
         v.Finish(canvas, this);
     }
 
@@ -162,17 +166,17 @@ public sealed class TileRenderer
     public void DrawNetworkTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double downBps, double upBps, string interfaceName)
     {
         // No alert path: NET has no usage percentage.
-        var v = new TileVisual(TileKind.Network, s, accent, _theme, false) { Rect = rect, Y = rect.Top + 16, SparkWindowSeconds = _netWindowSeconds };
+        var v = new TileVisual(TileKind.Network, s, accent, _theme, false) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _netWindowSeconds };
         DrawCard(canvas, rect);
         DrawTitle(canvas, v, "NET");
         // Big value = download rate, formatted like the disk tile's throughput.
-        DrawBigValueLiteral(canvas, v, Format.Bytes((ulong)downBps) + "/s");
+        DrawBigValueLiteral(canvas, v, Format.Rate((ulong)downBps, s.UnitMode, TileKind.Network));
         // ShowUsageBar flag is consumed gracefully: nothing is drawn for the bar
         // row, and the sparkline below simply fills the remaining space.
         // Dual graph: down (accent) + up (violet) throughput in one sparkline.
         DrawSparkline(canvas, v, _netHistory, true, _netUpHistory, TilePalette.NetUp, "↓", "↑");
-        string iface = Truncate(canvas, interfaceName, rect.Width - 32, "Segoe UI", 14);
-        DrawSecondary(canvas, v, $"↑ {Format.Bytes((ulong)upBps)}/s   •   {iface}");
+        string iface = Truncate(canvas, interfaceName, rect.Width - 2 * TilePad, "Segoe UI", 14);
+        DrawSecondary(canvas, v, $"↑ {Format.Rate((ulong)upBps, s.UnitMode, TileKind.Network)}   •   {iface}");
         v.Finish(canvas, this);
     }
 
@@ -184,7 +188,7 @@ public sealed class TileRenderer
     private void DrawBigValueLiteral(SKCanvas canvas, TileVisual v, string literal)
     {
         if (!v.Settings.ShowBigValue) return;
-        float x = v.Rect.Left + 16;
+        float x = v.Rect.Left + TilePad;
         using var paint = new SKPaint { Color = v.ValueColor, IsAntialias = true };
         using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Light"), 46);
         canvas.DrawText(literal, x, v.Y + 40, font, paint);
@@ -390,7 +394,7 @@ public sealed class TileRenderer
             canvas.DrawRoundRect(rr, border);
             using var tPaint = new SKPaint { Color = accent, IsAntialias = true };
             using var tFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 15);
-            canvas.DrawText(tile.Title, rect.Left + 16, rect.Top + 30, tFont, tPaint);
+            canvas.DrawText(tile.Title, rect.Left + TilePad, rect.Top + 30, tFont, tPaint);
         }
         finally
         {
@@ -444,7 +448,7 @@ public sealed class TileRenderer
     private void DrawTitle(SKCanvas canvas, TileVisual v, string text)
     {
         if (!v.Settings.ShowTitle) return;
-        float x = v.Rect.Left + 16;
+        float x = v.Rect.Left + TilePad;
         using var paint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
         using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 15);
         canvas.DrawText(text, x, v.Y + 14, font, paint);
@@ -454,7 +458,7 @@ public sealed class TileRenderer
     private void DrawBigValue(SKCanvas canvas, TileVisual v, double value, string suffix)
     {
         if (!v.Settings.ShowBigValue) return;
-        float x = v.Rect.Left + 16;
+        float x = v.Rect.Left + TilePad;
         using var paint = new SKPaint { Color = v.ValueColor, IsAntialias = true };
         using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Light"), 46);
         string valStr = Format.Value(value);
@@ -470,8 +474,8 @@ public sealed class TileRenderer
     private void DrawBar(SKCanvas canvas, TileVisual v, double fraction)
     {
         if (!v.Settings.ShowUsageBar) return;
-        float x = v.Rect.Left + 16;
-        float w = v.Rect.Width - 32;
+        float x = v.Rect.Left + TilePad;
+        float w = v.Rect.Width - 2 * TilePad;
         float y = v.Y;
         float h = 10;
         fraction = Math.Max(0, Math.Min(1, fraction));
@@ -517,7 +521,7 @@ public sealed class TileRenderer
                 if (s.Item2 > dataMax) dataMax = s.Item2;
         double axis = NextAxisMax(v.Kind, dataMax, isBytes);
         v.SparkRange = (0, axis);
-        v.SparkMaxLabel = isBytes ? Format.Bytes((ulong)axis) + "/s" : $"{axis:0}%";
+        v.SparkMaxLabel = isBytes ? Format.Rate((ulong)axis, v.Settings.UnitMode, v.Kind) : $"{axis:0}%";
         // Reference line pinned at 90% of the axis on every tile: near the top,
         // never wanders, level across tiles.
         v.SparkTypicalMax = axis * 0.9;
@@ -776,6 +780,7 @@ public sealed class TileRenderer
     {
         public SKRect Pane { get; init; }
         public IReadOnlyList<SKRect> Toggles { get; init; } = Array.Empty<SKRect>();
+        public IReadOnlyList<SKRect> UnitSegments { get; init; } = Array.Empty<SKRect>();
         public IReadOnlyList<SKRect> Swatches { get; init; } = Array.Empty<SKRect>();
         public SKRect Custom { get; init; }
         public SKRect Reset { get; init; }
@@ -804,6 +809,11 @@ public sealed class TileRenderer
         }
 
         y += 4;
+        // Units segmented control (Auto / Bits / Bytes) between toggles and divider.
+        float unitLabelH = PaneAccentLabelH;
+        var unitSegs = SegmentRects(x, right, y + unitLabelH, PaneToggleH);
+        y += unitLabelH + PaneToggleH;
+
         y += 10; // divider gap
         y += PaneAccentLabelH;
 
@@ -830,6 +840,7 @@ public sealed class TileRenderer
         {
             Pane = p,
             Toggles = toggles,
+            UnitSegments = unitSegs,
             Swatches = swatches,
             Custom = custom,
             Reset = reset,
@@ -870,6 +881,15 @@ public sealed class TileRenderer
         }
         y = layout.Toggles[^1].Bottom + 4;
 
+        // Units segmented control (Auto / Bits / Bytes).
+        using var unitLabelPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
+        using var unitLabelFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 12);
+        canvas.DrawText("Units", x, y + 11, unitLabelFont, unitLabelPaint);
+        string[] unitLabels = { "Auto", "Bits", "Bytes" };
+        int unitIdx = (int)v.Settings.UnitMode;
+        DrawSegments(canvas, layout.UnitSegments, unitLabels, unitIdx, v.Accent);
+        y = layout.UnitSegments[^1].Bottom + 4;
+
         using var div = new SKPaint { Color = _theme.TileBorder, Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
         canvas.DrawLine(x, y, right, y, div);
         y += 10;
@@ -907,7 +927,6 @@ public sealed class TileRenderer
         public SKRect Pane { get; init; }
         public SKRect Close { get; init; }
         public SKRect LaunchToggle { get; init; }
-        public IReadOnlyList<SKRect> UnitsSegments { get; init; } = Array.Empty<SKRect>();
         public SKRect KioskToggle { get; init; }
         public SKRect AlwaysOnTopToggle { get; init; }
         public IReadOnlyList<SKRect> ThemeSegments { get; init; } = Array.Empty<SKRect>();
@@ -988,7 +1007,6 @@ public sealed class TileRenderer
 
         // ---- right column ----
         float ry = p.Top + pad + 20;
-        var unitsSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segRowH + toggleGap;
         var themeSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segRowH + toggleGap;
         var graphSpanSegs = SegmentRects(rightX, rx, ry + segLabelH, segH, 4); ry += segRowH + toggleGap;
         var decimalsSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segRowH + toggleGap;
@@ -1011,7 +1029,6 @@ public sealed class TileRenderer
             Pane = p,
             Close = close,
             LaunchToggle = launchToggle,
-            UnitsSegments = unitsSegs,
             KioskToggle = kioskToggle,
             AlwaysOnTopToggle = alwaysOnTopToggle,
             ThemeSegments = themeSegs,
@@ -1079,12 +1096,7 @@ public sealed class TileRenderer
         DrawStepper(canvas, layout.ThresholdMinus, layout.ThresholdValue, layout.ThresholdPlus,
             $"{config.ThresholdPercent:0}%", _theme.Accent);
 
-        // ---- right column: Units / Theme segmented ----
-        DrawRowLabel(canvas, layout.UnitsSegments[0].Left, layout.UnitsSegments[0].Top - segLabelH, segLabelH, "Units");
-        string[] unitLabels = { "Auto", "MB", "GB" };
-        int unitIdx = (int)config.Units;
-        DrawSegments(canvas, layout.UnitsSegments, unitLabels, unitIdx, _theme.Accent);
-
+        // ---- right column: Theme segmented ----
         DrawRowLabel(canvas, layout.ThemeSegments[0].Left, layout.ThemeSegments[0].Top - segLabelH, segLabelH, "Theme");
         string[] themeLabels = { "Midnight", "Obsidian", "Daybreak" };
         int themeIdx = IndexOfTheme(currentTheme.Name);
@@ -1360,7 +1372,7 @@ public sealed class TileVisual
 
     public void Finish(SKCanvas canvas, TileRenderer renderer)
     {
-        float pad = 16;
+        float pad = TileRenderer.TilePad;
         float bottom = Rect.Bottom - pad;
         float top = Y + 4;
 

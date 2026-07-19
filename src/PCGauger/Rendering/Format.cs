@@ -4,32 +4,54 @@ namespace PCGauger.Rendering;
 
 /// <summary>
 /// Human-readable formatting for metric values (bytes -> MB/GB, MHz, percentages).
+/// Byte formatting is per-tile: each tile resolves its own bits/bytes axis and
+/// auto-scales magnitude (no fixed-unit toggle).
 /// </summary>
 public static class Format
 {
     /// <summary>
-    /// Current byte-display mode, set from AppConfig on load/change. Auto scales
-    /// adaptively; MB/GB force a fixed unit.
+    /// Resolves whether a tile should display a bits axis (Mbps/Gbps) or a bytes
+    /// axis (MB/s/GB/s). Auto picks bits for Network throughput, bytes otherwise.
     /// </summary>
-    public static UnitsMode Units { get; set; } = UnitsMode.Auto;
+    public static bool ResolveBits(TileUnitMode mode, TileKind kind)
+        => mode == TileUnitMode.Bits
+        || (mode == TileUnitMode.Auto && kind == TileKind.Network);
 
-    public static string Bytes(ulong bytes)
+    /// <summary>
+    /// Formats a byte count as a storage size (e.g. "8.0 GB", "512 MB"). The axis
+    /// (bits/bytes) and magnitude auto-scale; <paramref name="kind"/> selects the
+    /// Auto default.
+    /// </summary>
+    public static string Size(ulong bytes, TileUnitMode mode, TileKind kind)
+        => FormatBytes(bytes, ResolveBits(mode, kind), false);
+
+    /// <summary>
+    /// Formats a byte rate as a throughput (e.g. "120 Mbps", "1.2 GB/s"). The axis
+    /// (bits/bytes) and magnitude auto-scale; <paramref name="kind"/> selects the
+    /// Auto default.
+    /// </summary>
+    public static string Rate(ulong bytesPerSec, TileUnitMode mode, TileKind kind)
+        => FormatBytes(bytesPerSec, ResolveBits(mode, kind), true);
+
+    private static string FormatBytes(ulong value, bool bits, bool rate)
     {
-        if (Units == UnitsMode.MB)
-            return $"{bytes / 1024.0 / 1024.0:0.0} MB";
-        if (Units == UnitsMode.GB)
-            return $"{bytes / 1024.0 / 1024.0 / 1024.0:0.00} GB";
-
-        // Auto: adaptive scaling (original behavior).
-        double v = bytes;
-        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        // Bits axis: convert bytes -> bits.
+        double v = bits ? value * 8.0 : value;
+        string[] units = bits
+            ? new[] { "bps", "Kbps", "Mbps", "Gbps", "Tbps" }
+            : new[] { "B", "KB", "MB", "GB", "TB" };
         int i = 0;
-        while (v >= 1024 && i < units.Length - 1)
+        while (v >= 1000 && i < units.Length - 1)
         {
-            v /= 1024;
+            v /= 1000;
             i++;
         }
-        return $"{v:0.##} {units[i]}";
+        // Bits units already carry "ps" (per second); only the bytes axis needs
+        // an explicit "/s" for rates.
+        string suffix = rate && !bits ? $"/s" : "";
+        // Small values (b/Kb, B/KB) get two decimals; larger units one.
+        string num = i <= 1 ? $"{v:0.##}" : $"{v:0.#}";
+        return $"{num} {units[i]}{suffix}";
     }
 
     public static string Mhz(uint mhz) => $"{mhz:N0} MHz";

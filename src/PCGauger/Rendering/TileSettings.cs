@@ -1,3 +1,4 @@
+using PCGauger.Infrastructure;
 using SkiaSharp;
 
 namespace PCGauger.Rendering;
@@ -20,4 +21,10 @@ public sealed class TileSettings
     public bool ShowUsageBar { get; set; } = true;
     public bool ShowSparkline { get; set; } = true;
     public bool ShowSecondaryLine { get; set; } = true;
+
+    /// <summary>
+    /// Per-tile byte-display mode. Auto = sensible per-kind default (Network
+    /// shows bits/throughput, others show bytes); Bits/Bytes force the axis.
+    /// </summary>
+    public TileUnitMode UnitMode { get; set; } = TileUnitMode.Auto;
 }

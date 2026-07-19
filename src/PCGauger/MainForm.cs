@@ -86,9 +86,8 @@ public sealed class MainForm : Form
         ShowInTaskbar = false;
         BackColor = Color.Black;
 
-        // Apply persisted theme + units + threshold before building anything.
+        // Apply persisted theme + threshold before building anything.
         _theme = Theme.FromName(_config.ThemeName);
-        Format.Units = _config.Units;
         Format.ValueDecimals = _config.ValueDecimals;
         TileRenderer.ThresholdEnabled = _config.ThresholdEnabled;
         TileRenderer.ThresholdPercent = _config.ThresholdPercent;
@@ -677,6 +676,22 @@ public sealed class MainForm : Form
             }
         }
 
+        for (int i = 0; i < layout.UnitSegments.Count; i++)
+        {
+            if (layout.UnitSegments[i].Contains(p.X, p.Y))
+            {
+                tile.Settings.UnitMode = (TileUnitMode)i;
+                var tc = _config.Tile(tile.Kind);
+                tc.UnitMode = tile.Settings.UnitMode;
+                tc.AccentArgb = tile.Settings.AccentColor.HasValue
+                    ? (uint)((tile.Settings.AccentColor.Value.Alpha << 24) | (tile.Settings.AccentColor.Value.Red << 16) | (tile.Settings.AccentColor.Value.Green << 8) | tile.Settings.AccentColor.Value.Blue)
+                    : null;
+                _config.Save();
+                _surface.Invalidate();
+                return;
+            }
+        }
+
         for (int i = 0; i < layout.Swatches.Count; i++)
         {
             if (layout.Swatches[i].Contains(p.X, p.Y))
@@ -721,7 +736,6 @@ public sealed class MainForm : Form
     private int GlobalRowAt(TileRenderer.GlobalPaneLayout g, Point p)
     {
         if (g.LaunchToggle.Contains(p.X, p.Y)) return 0;
-        for (int i = 0; i < g.UnitsSegments.Count; i++) if (g.UnitsSegments[i].Contains(p.X, p.Y)) return 1;
         if (g.KioskToggle.Contains(p.X, p.Y)) return 2;
         if (g.AlwaysOnTopToggle.Contains(p.X, p.Y)) return 3;
         for (int i = 0; i < g.ThemeSegments.Count; i++) if (g.ThemeSegments[i].Contains(p.X, p.Y)) return 4;
@@ -745,18 +759,6 @@ public sealed class MainForm : Form
             _config.Save();
             _surface.Invalidate();
             return;
-        }
-        for (int i = 0; i < g.UnitsSegments.Count; i++)
-        {
-            if (g.UnitsSegments[i].Contains(p.X, p.Y))
-            {
-                _config.Units = (UnitsMode)i;
-        Format.Units = _config.Units;
-        Format.ValueDecimals = _config.ValueDecimals;
-                _config.Save();
-                _surface.Invalidate();
-                return;
-            }
         }
         if (g.KioskToggle.Contains(p.X, p.Y))
         {
@@ -1122,8 +1124,8 @@ public sealed class MainForm : Form
         double gpuPct = MetricValue(topSnap, "proc.topgpu.pct");
 
         using var labelPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var labelFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 12);
-        using var valueFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 12);
+        using var labelFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 14);
+        using var valueFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 14);
         float cy = bandTop + FooterHeight / 2f + 4;
         float x = 14;
         float gap = 22;
@@ -1146,7 +1148,7 @@ public sealed class MainForm : Form
         }
 
         Segment("CPU Top: ", $"{cpuName} {Format.Percent(cpuPct)}", AccentOf(TileKind.Cpu));
-        Segment("RAM Top: ", $"{ramName} {Format.Bytes(ramBytes)}", AccentOf(TileKind.Ram));
+        Segment("RAM Top: ", $"{ramName} {Format.Size(ramBytes, TileUnitMode.Auto, TileKind.Ram)}", AccentOf(TileKind.Ram));
         Segment("GPU Top: ", $"{gpuName} {Format.Percent(gpuPct)}", AccentOf(TileKind.Gpu));
 
         // Footer gear at far right.

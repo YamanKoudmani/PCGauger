@@ -162,6 +162,12 @@ public sealed class MainForm : Form
         // value when constructed later).
         TopMost = _config.AlwaysOnTop;
 
+        // Apply persisted kiosk mode at startup (fill the mini panel if enabled).
+        ApplyWindowBounds();
+        // Re-assert once the window is shown, in case the mini panel wasn't
+        // enumerated yet when the constructor ran.
+        Shown += (_, _) => ApplyWindowBounds();
+
         _renderTimer = new System.Windows.Forms.Timer { Interval = 33 };
         _renderTimer.Tick += (_, _) => _surface.Invalidate();
         _renderTimer.Start();
@@ -185,12 +191,13 @@ public sealed class MainForm : Form
     {
         if (_config.KioskMode && TryFindMiniPanel(out var screen))
         {
+            StartPosition = FormStartPosition.Manual;
             Bounds = screen.Bounds; // fill the mini panel
         }
         else
         {
             var b = _floatingBounds;
-            if (b.X == 0 && b.Y == 0 && b.Width == 0 && b.Height == 0)
+            if (b.Width == 0 || b.Height == 0)
                 StartPosition = FormStartPosition.CenterScreen;
             else
             {
@@ -219,20 +226,13 @@ public sealed class MainForm : Form
 
     private void SetKiosk(bool on)
     {
+        // Remember the current floating position only when leaving it, so a
+        // later restore returns to where the window actually was.
+        if (on && !_config.KioskMode)
+            _floatingBounds = Bounds;
         _config.KioskMode = on;
-        if (on && TryFindMiniPanel(out var screen))
-        {
-            _floatingBounds = Bounds; // remember floating position for restore
-            Bounds = screen.Bounds;
-        }
-        else
-        {
-            // Restore floating window at saved/centered bounds.
-            var b = _floatingBounds;
-            StartPosition = FormStartPosition.Manual;
-            Bounds = b;
-        }
         _config.Save();
+        ApplyWindowBounds();
         _surface.Invalidate();
     }
 

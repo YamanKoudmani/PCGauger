@@ -9,6 +9,7 @@
     <AssemblyName>PCGauger</AssemblyName>
     <RootNamespace>PCGauger</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 

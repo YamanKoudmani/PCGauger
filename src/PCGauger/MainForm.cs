@@ -163,6 +163,18 @@ public sealed class MainForm : Form
         _renderTimer = new System.Windows.Forms.Timer { Interval = 33 };
         _renderTimer.Tick += (_, _) => _surface.Invalidate();
         _renderTimer.Start();
+
+        // First run only: register a Start Menu shortcut pointing at this exe.
+        // If the user later deletes it by hand we don't recreate it.
+        if (!_config.StartMenuRegistered && Infrastructure.StartMenuShortcut.EnsureCreated())
+        {
+            _config.StartMenuRegistered = true;
+            _config.Save();
+        }
+
+        // Use the exe's embedded icon for taskbar / alt-tab.
+        try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? Icon; }
+        catch { /* keep default icon */ }
     }
 
     // ---- Window bounds / kiosk ----

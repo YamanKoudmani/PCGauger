@@ -74,6 +74,10 @@ public sealed class AppConfig
     public bool LaunchAtStartup { get; set; }
     public bool AlwaysOnTop { get; set; }
     public bool KioskMode { get; set; }
+
+    /// <summary>Set once a Start Menu shortcut has been created, so a user who
+    /// later deletes it manually doesn't get it re-created on every launch.</summary>
+    public bool StartMenuRegistered { get; set; }
     public bool ThresholdEnabled { get; set; }
     public double ThresholdPercent { get; set; } = 90;
 

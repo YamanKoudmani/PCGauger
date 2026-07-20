@@ -27,7 +27,7 @@ namespace PCGauger.Metrics.Providers;
 ///   metrics: net.down (B/s), net.up (B/s), net.name (string in Unit slot)
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class NetworkProvider : IMetricProvider
+public sealed class NetworkProvider : IMetricProvider, IAsyncResolvable
 {
     public string InterfaceName { get; private set; } = "-";
     public double DownBytesPerSec { get; private set; }
@@ -63,6 +63,44 @@ public sealed class NetworkProvider : IMetricProvider
     public NetworkProvider(string interfaceId)
     {
         _boundId = interfaceId;
+    }
+
+    /// <summary>
+    /// Deferred-resolution constructor. The base ctor only stores the id (no
+    /// blocking I/O), so this simply forwards. <see cref="BeginResolve"/> runs
+    /// the interface lookup off-thread with a timeout to populate availability.
+    /// </summary>
+    public NetworkProvider(string interfaceId, bool deferResolution)
+        : this(interfaceId)
+    {
+        // No synchronous I/O to skip; resolution is always async via Update /
+        // BeginResolve. The flag is accepted for API symmetry with the other
+        // providers and is otherwise unused here.
+    }
+
+    /// <summary>
+    /// Begins asynchronous device resolution (off-thread, timeout-bounded).
+    /// Non-blocking; safe to call from the UI thread. For an explicit id it
+    /// confirms the bound interface is present; for auto-select it pre-picks the
+    /// default-route adapter. Even without this call, <see cref="Update"/>
+    /// re-evaluates each poll, so the tile always recovers.
+    /// </summary>
+    public void BeginResolve()
+    {
+        if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
+        Task.Run(() =>
+        {
+            if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
+            // Touch the network stack once off-thread so any first-call cost
+            // (interface enumeration) doesn't land on the UI thread. Update()
+            // already guards and sets DeviceAvailable; this just warms it.
+            try
+            {
+                if (_boundId == null) SelectInterface();
+                else FindById(_boundId);
+            }
+            catch { /* leave last good state; Update will re-evaluate */ }
+        });
     }
 
     public void Update(TimeSpan elapsed)

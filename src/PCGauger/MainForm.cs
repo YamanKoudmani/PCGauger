@@ -151,26 +151,48 @@ public sealed class MainForm : Form
 
         _poller = new MetricPoller(new IMetricProvider[] { _cpu, _top }, TimeSpan.FromMilliseconds(1000));
         _memPoller = new MetricPoller(new IMetricProvider[] { _mem }, TimeSpan.FromMilliseconds(1000));
-        _poller.Start();
-        _memPoller.Start();
 
         // v1 -> v2 migration (idempotent; never throws). After this, TileInstances
         // is non-empty and every created instance has a ConfigKey entry.
         MigrateConfigV1ToV2();
 
         // Build a runtime + tile for every persisted instance, in creation order.
+        // Providers are constructed with deferResolution:true so NO device I/O
+        // happens here — the form comes up instantly and devices resolve after.
         foreach (var configKey in _config.TileInstances)
         {
-            if (!TryParseConfigKey(configKey, out var kind, out var deviceId)) continue;
-            var rt = CreateInstanceTile(kind, deviceId);
-            if (rt == null) continue;
-            _config.Tile(configKey).ApplyTo(rt.Tile.Settings);
-            _allTiles.Add(rt.Tile);
-            if (_config.Tile(configKey).Enabled)
-                _tiles.Add(rt.Tile);
+            try
+            {
+                if (!TryParseConfigKey(configKey, out var kind, out var deviceId)) continue;
+                var rt = CreateInstanceTile(kind, deviceId);
+                if (rt == null) continue;
+                _config.Tile(configKey).ApplyTo(rt.Tile.Settings);
+                _allTiles.Add(rt.Tile);
+                if (_config.Tile(configKey).Enabled)
+                    _tiles.Add(rt.Tile);
+            }
+            catch
+            {
+                // A single bad instance must not break the rest of startup.
+            }
         }
+
+        // Start the pollers ONLY after every provider has been registered via
+        // _poller.Add / _memPoller.Add in the loop above. Starting earlier would
+        // let a Tick (which runs device I/O) race a UI-thread Add under the lock
+        // and intermittently hang startup.
+        _poller.Start();
+        _memPoller.Start();
+
+        // Kick off asynchronous device resolution for every resolvable provider
+        // now that the tiles exist. This runs off-thread with hard timeouts, so
+        // the UI thread is never blocked on DXGI/DriveInfo/NIC enumeration.
+        foreach (var rt in _runtimes)
+            (rt.Provider as IAsyncResolvable)?.BeginResolve();
         ApplyTileOrder();
 
+        ApplyWindowBounds();
+        TopMost = _config.AlwaysOnTop;
         ApplyWindowBounds();
 
         // Apply persisted always-on-top to this window (detached forms read the
@@ -186,12 +208,14 @@ public sealed class MainForm : Form
             ApplyWindowBounds();
             // The form is visible and painted — dismiss the loading splash
             // (covers the single-file runtime extraction pause on first run).
-            _splash?.BeginInvoke((Action)(() => _splash.Close()));
+            // The splash runs its own loop on the UI thread, so close it
+            // directly here (we are already on the UI thread).
+            _splash?.SignalReady();
         };
 
         _renderTimer = new System.Windows.Forms.Timer { Interval = 33 };
         _renderTimer.Tick += (_, _) => _surface.Invalidate();
-        _renderTimer.Start();
+        Shown += (_, _) => _renderTimer.Start();
 
         // First run only: register a Start Menu shortcut pointing at this exe.
         // If the user later deletes it by hand we don't recreate it.
@@ -240,14 +264,16 @@ public sealed class MainForm : Form
     /// </summary>
     private static Rectangle ClampToVisibleScreen(Rectangle b)
     {
-        foreach (var s in Screen.AllScreens)
-        {
-            if (s.WorkingArea.IntersectsWith(b)) return b;
-        }
-
-        // Off-screen: anchor to the primary screen's working area, keeping the
-        // saved size but ensuring the top-left is visible.
+        // The window is reachable only if its top-left corner sits inside the
+        // PRIMARY screen's working area. A saved position on a secondary
+        // monitor the user isn't watching (or a now-disconnected head that
+        // Windows still enumerates) passes an "any screen" test and parks
+        // the window where it looks gone. Default to the primary screen
+        // (the one with the taskbar) so the window is always on the
+        // display the user is actually looking at.
         var wa = Screen.PrimaryScreen!.WorkingArea;
+        if (wa.Contains(b.Location)) return b;
+
         int x = Math.Max(wa.Left, Math.Min(b.X, wa.Right - b.Width));
         int y = Math.Max(wa.Top, Math.Min(b.Y, wa.Bottom - b.Height));
         return new Rectangle(x, y, b.Width, b.Height);
@@ -1714,20 +1740,20 @@ public sealed class MainForm : Form
             case TileKind.Gpu:
                 catalog = _gpuCatalog;
                 if (!int.TryParse(deviceId, out int gpuIdx)) gpuIdx = 0;
-                provider = new GpuProvider(gpuIdx);
+                provider = new GpuProvider(gpuIdx, deferResolution: true);
                 _poller.Add(provider);
                 tile = new Tile(TileKind.Gpu, "GPU", (c, r) => DrawGpu(c, r, tile), deviceId);
                 break;
             case TileKind.Disk:
                 catalog = _diskCatalog;
-                provider = new StorageProvider(deviceId);
+                provider = new StorageProvider(deviceId, deferResolution: true);
                 _poller.Add(provider);
                 tile = new Tile(TileKind.Disk, "DISK", (c, r) => DrawDisk(c, r, tile), deviceId);
                 histB = new RollingHistory(TimeSpan.FromSeconds(60));
                 break;
             case TileKind.Network:
                 catalog = _netCatalog;
-                provider = new NetworkProvider(deviceId);
+                provider = new NetworkProvider(deviceId, deferResolution: true);
                 _poller.Add(provider);
                 tile = new Tile(TileKind.Network, "NET", (c, r) => DrawNet(c, r, tile), deviceId);
                 histB = new RollingHistory(TimeSpan.FromSeconds(60));
@@ -1740,7 +1766,12 @@ public sealed class MainForm : Form
         {
             tile.DeviceSource = () => catalog.GetDevices();
             tile.DevicePicked = id => RebindTileDevice(tile, id);
-            tile.DeviceDisplayName = DisplayNameFor(kind, deviceId);
+            // Placeholder display name at construction time. Resolving it via
+            // DisplayNameFor → GetDevices() would do a synchronous DXGI/NIC/
+            // DriveInfo enumeration on the UI thread and stall startup, so we
+            // defer it: the picker resolves the friendly name lazily from
+            // DeviceSource when it builds its list.
+            tile.DeviceDisplayName = deviceId;
             tile.DeviceAvailable = provider switch
             {
                 GpuProvider g => g.DeviceAvailable,
@@ -1778,10 +1809,13 @@ public sealed class MainForm : Form
         {
             if (_config.TileInstances.Count > 0) return; // already v2
 
-            // Resolve default device ids (placeholder "unknown" if none present).
-            string diskId = _diskCatalog.DefaultDeviceId ?? "unknown";
-            string gpuId = _gpuCatalog.DefaultDeviceId ?? "unknown";
-            string netId = _netCatalog.DefaultDeviceId ?? "unknown";
+            // Resolve default device ids WITHOUT live enumeration — migration must
+            // not block on device I/O. These placeholders are resolved later by
+            // each provider's asynchronous BeginResolve (and by the catalogs when
+            // a picker is opened). v1 implicitly showed GPU adapter 0.
+            string diskId = "unknown";   // resolved later by StorageProvider
+            string gpuId  = "0";         // v1 implicitly showed adapter 0
+            string netId  = "unknown";   // resolved later by NetworkProvider
 
             var resolved = new List<string>
             {

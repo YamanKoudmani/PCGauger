@@ -27,6 +27,11 @@ internal sealed class HitTestSurface : SKControl
     /// </summary>
     public System.Func<System.Drawing.Point, int>? HitTestOverride { get; set; }
 
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+    }
+
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WM_NCHITTEST)

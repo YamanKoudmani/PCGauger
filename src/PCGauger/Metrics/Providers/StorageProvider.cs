@@ -1,6 +1,8 @@
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Threading;
+using System.Threading.Tasks;
 using PCGauger.Metrics;
 
 namespace PCGauger.Metrics.Providers;
@@ -21,7 +23,7 @@ namespace PCGauger.Metrics.Providers;
 /// returns (counters are lazily (re)opened each time the device comes back).
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class StorageProvider : IMetricProvider
+public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
 {
     private readonly string _drive;
     private readonly string _pdhInstance; // "C:" form used by LogicalDisk counters
@@ -45,6 +47,11 @@ public sealed class StorageProvider : IMetricProvider
     // native PDH handles. Set only in Dispose; read on the hot path.
     private int _disposed;
 
+    // Cap on the media probe in the ctor. A bad/removable volume can make
+    // DriveInfo.IsReady block, so the probe runs off-thread and is abandoned
+    // past this rather than hanging startup.
+    private const int ProbeTimeoutMs = 1000;
+
     /// <summary>
     /// True while the drive is present, ready, and its PDH counters are open.
     /// False for a missing/unready volume or when counter setup failed — the
@@ -53,6 +60,19 @@ public sealed class StorageProvider : IMetricProvider
     public bool DeviceAvailable { get; private set; }
 
     public StorageProvider(string drive = null!)
+        : this(drive, false)
+    {
+    }
+
+    /// <summary>
+    /// Deferred-resolution constructor. Normalizes the drive path and probes
+    /// availability UNLESS <paramref name="deferResolution"/> is true — that's
+    /// how this overload avoids the blocking <see cref="DriveInfo.IsReady"/>
+    /// call on the UI thread at startup (DeviceAvailable starts false). The
+    /// caller invokes <see cref="BeginResolve"/> after the form is shown.
+    /// Counters are opened lazily on first successful update regardless.
+    /// </summary>
+    public StorageProvider(string drive, bool deferResolution)
     {
         // Normalize to a "C:" form. The parameterless ctor keeps v1 semantics:
         // the system drive (Environment.SystemDirectory root), exactly as before.
@@ -67,17 +87,26 @@ public sealed class StorageProvider : IMetricProvider
         _pdhInstance = _drive.TrimEnd('\\');
         if (_pdhInstance.Length == 0) _pdhInstance = "C:";
 
-        // Probe availability immediately; counters are opened lazily on first
-        // successful update so a not-yet-ready drive doesn't fail construction.
-        ProbeAvailability();
+        // Probe availability immediately unless deferred; counters are opened
+        // lazily on first successful update so a not-yet-ready drive doesn't
+        // fail construction. When deferred, the UI thread is never blocked on a
+        // slow/removable volume — BeginResolve() probes off-thread later.
+        if (!deferResolution) ProbeAvailability();
     }
 
     private void ProbeAvailability()
     {
         try
         {
-            var di = new DriveInfo(_drive);
-            DeviceAvailable = di.IsReady;
+            // Run the media probe off-thread with a timeout: a missing/removable
+            // volume can make DriveInfo.IsReady block, which would otherwise hang
+            // construction (and thus startup) on the UI thread.
+            var task = Task.Run(() =>
+            {
+                var di = new DriveInfo(_drive);
+                return di.IsReady;
+            });
+            DeviceAvailable = task.Wait(ProbeTimeoutMs) && task.Result;
         }
         catch
         {
@@ -229,6 +258,24 @@ public sealed class StorageProvider : IMetricProvider
     public double BytesPerSec => _readBytesPerSec + _writeBytesPerSec;
     public double ReadBytesPerSec => _readBytesPerSec;
     public double WriteBytesPerSec => _writeBytesPerSec;
+
+    /// <summary>
+    /// Begins asynchronous device resolution (off-thread, timeout-bounded).
+    /// Non-blocking; safe to call from the UI thread. Probes the volume and
+    /// opens PDH counters on a worker thread, flipping <see cref="DeviceAvailable"/>
+    /// when it lands. Even without this call, <see cref="Update"/> re-probes via
+    /// <see cref="EnsureCounters"/> on first poll, so the tile always recovers.
+    /// </summary>
+    public void BeginResolve()
+    {
+        if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
+        Task.Run(() =>
+        {
+            if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
+            ProbeAvailability();
+            if (DeviceAvailable) EnsureCounters();
+        });
+    }
 
     public void Dispose()
     {

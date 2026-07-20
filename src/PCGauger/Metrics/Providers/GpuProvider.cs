@@ -1,5 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Threading;
+using System.Threading.Tasks;
 using PCGauger.Metrics;
 
 namespace PCGauger.Metrics.Providers;
@@ -24,10 +26,14 @@ namespace PCGauger.Metrics.Providers;
 /// tile reports zeros; <see cref="Update"/> never throws.
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class GpuProvider : IMetricProvider
+public sealed class GpuProvider : IMetricProvider, IAsyncResolvable
 {
     private readonly int _adapterIndex;
-    private readonly string? _luidFragment; // "luid_0x{High:X8}_0x{Low:X8}" to match PDH instances
+    private string? _luidFragment; // "luid_0x{High:X8}_0x{Low:X8}" to match PDH instances
+
+    // Cap on the whole adapter-resolution unit (Create + Enum + GetDesc1) done
+    // in the ctor. Keeps construction bounded even if every native step stalls.
+    private const int AdapterResolveTimeoutMs = 1500;
 
     private IntPtr _query;
     private IntPtr _counter;
@@ -58,8 +64,9 @@ public sealed class GpuProvider : IMetricProvider
     /// <summary>
     /// DXGI adapter description (e.g. "NVIDIA GeForce RTX 4070"). Empty for the
     /// parameterless all-adapters ctor or when the adapter can't be described.
+    /// May be populated asynchronously if the ctor's resolution timed out.
     /// </summary>
-    public string AdapterName { get; }
+    public string AdapterName { get; private set; }
 
     /// <summary>
     /// True while the requested adapter index resolves to a real adapter. False
@@ -81,34 +88,17 @@ public sealed class GpuProvider : IMetricProvider
     {
         _adapterIndex = adapterIndex;
 
-        // Resolve the adapter's LUID + description up front. If the index is out
-        // of range, mark unavailable and never open counters; Update stays safe.
-        string? luidFragment = null;
-        string adapterName = string.Empty;
-        bool luidZero = false;
-        try
+        // Resolve the adapter's LUID + description up front, but BOUNDED so a
+        // wedged DXGI call can't freeze the UI thread at startup. If resolution
+        // times out or finds nothing, mark unavailable and retry on a background
+        // thread (a driver that recovers later will then populate the tile).
+        if (!TryResolveAdapter(out var adapterName, out var luidFragment, out var luidZero))
         {
-            using var factory = DxgiFactory.Create();
-            using var adapter = factory.EnumAdapter((uint)adapterIndex);
-            if (adapter != null)
-            {
-                var desc = adapter.GetDesc1();
-                if (desc.HasValue)
-                {
-                    adapterName = desc.Value.Description ?? string.Empty;
-                    luidFragment = $"luid_0x{desc.Value.Luid.HighPart:X8}_0x{desc.Value.Luid.LowPart:X8}";
-                    // A zero LUID means a virtual/software adapter with no real
-                    // identity. The fragment "luid_0x00000000_0x00000000" would
-                    // Contains-match EVERY GPU Engine PDH instance and silently
-                    // sum all GPUs, so treat it as unavailable and never match.
-                    if (desc.Value.Luid.HighPart == 0 && desc.Value.Luid.LowPart == 0)
-                        luidZero = true;
-                }
-            }
-        }
-        catch
-        {
-            // Leave unavailable; Update will report zeros.
+            AdapterName = string.Empty;
+            _luidFragment = null;
+            DeviceAvailable = false;
+            ResolveLater();
+            return;
         }
 
         AdapterName = adapterName;
@@ -119,6 +109,105 @@ public sealed class GpuProvider : IMetricProvider
 
         if (DeviceAvailable)
             OpenCounters();
+    }
+
+    /// <summary>
+    /// Deferred-resolution constructor. Sets the provider unavailable and does
+    /// NO device I/O in the ctor — the caller invokes <see cref="BeginResolve"/>
+    /// (which calls <see cref="ResolveLater"/>) after the form is shown, so the
+    /// UI thread is never blocked on DXGI at startup.
+    /// </summary>
+    public GpuProvider(int adapterIndex, bool deferResolution)
+    {
+        _adapterIndex = adapterIndex;
+        AdapterName = string.Empty;
+        _luidFragment = null;
+        DeviceAvailable = false;
+        if (!deferResolution)
+        {
+            // Back-compat path: resolve synchronously (still timeout-bounded).
+            if (TryResolveAdapter(out var adapterName, out var luidFragment, out var luidZero))
+            {
+                AdapterName = adapterName;
+                _luidFragment = luidFragment;
+                DeviceAvailable = luidFragment != null && !luidZero;
+                if (DeviceAvailable) OpenCounters();
+            }
+        }
+        // When deferred, resolution is kicked off later via BeginResolve().
+    }
+
+    /// <summary>
+    /// Begins asynchronous device resolution (off-thread, timeout-bounded).
+    /// Non-blocking; safe to call from the UI thread. Delegates to the existing
+    /// <see cref="ResolveLater"/> retry path.
+    /// </summary>
+    public void BeginResolve() => ResolveLater();
+
+    /// <summary>
+    /// Resolves the adapter's description + LUID as a single off-thread unit with
+    /// a hard timeout, so the ctor never blocks on a hanging native DXGI call.
+    /// Returns false (and leaves out-params defaulted) on timeout or failure.
+    /// </summary>
+    private bool TryResolveAdapter(out string adapterName, out string? luidFragment, out bool luidZero)
+    {
+        adapterName = string.Empty;
+        luidFragment = null;
+        luidZero = false;
+        try
+        {
+            var task = Task.Run(() =>
+            {
+                using var factory = DxgiFactory.Create();
+                if (factory == null) return (string.Empty, (string?)null, false);
+                using var adapter = factory.EnumAdapter((uint)_adapterIndex);
+                if (adapter == null) return (string.Empty, (string?)null, false);
+                var desc = adapter.GetDesc1();
+                if (!desc.HasValue) return (string.Empty, (string?)null, false);
+                string name = desc.Value.Description ?? string.Empty;
+                string frag = $"luid_0x{desc.Value.Luid.HighPart:X8}_0x{desc.Value.Luid.LowPart:X8}";
+                // A zero LUID means a virtual/software adapter with no real
+                // identity. The fragment "luid_0x00000000_0x00000000" would
+                // match EVERY GPU Engine PDH instance and silently sum all GPUs,
+                // so treat it as unavailable and never match.
+                bool zero = desc.Value.Luid.HighPart == 0 && desc.Value.Luid.LowPart == 0;
+                return (name, frag, zero);
+            });
+            if (!task.Wait(AdapterResolveTimeoutMs)) return false; // hung -> avoid freeze
+            var r = task.Result;
+            adapterName = r.Item1;
+            luidFragment = r.Item2;
+            luidZero = r.Item3;
+            return luidFragment != null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Retries <see cref="TryResolveAdapter"/> on a worker thread after a ctor
+    /// timeout, so a GPU that becomes available (driver recovers, RDP session
+    /// attaches) still populates the tile. No-ops if disposed or already
+    /// resolved. Never throws.
+    /// </summary>
+    private void ResolveLater()
+    {
+        if (_adapterIndex < 0) return;
+        Task.Run(() =>
+        {
+            // Bail if we were disposed while queued, or resolution already landed.
+            if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
+            if (DeviceAvailable) return;
+            if (!TryResolveAdapter(out var name, out var frag, out var zero)) return;
+            if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
+
+            _luidFragment = frag;
+            AdapterName = name;
+            DeviceAvailable = frag != null && !zero;
+            if (DeviceAvailable) OpenCounters();
+        });
     }
 
     private void OpenCounters()
@@ -280,6 +369,7 @@ public sealed class GpuProvider : IMetricProvider
         try
         {
             _dxgiFactory = DxgiFactory.Create();
+            if (_dxgiFactory == null) return null; // DXGI hung/unavailable
             _dxgiAdapter = _dxgiFactory.EnumAdapter(_adapterIndex >= 0 ? (uint)_adapterIndex : 0);
             if (_dxgiAdapter == null)
             {

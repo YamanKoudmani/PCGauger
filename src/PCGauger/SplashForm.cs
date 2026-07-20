@@ -4,17 +4,21 @@ using System.Windows.Forms;
 namespace PCGauger;
 
 /// <summary>
-/// Minimal borderless loading splash with an animated spinner. Shown the instant
-/// the runtime is up (before the main SkiaSharp form finishes initializing) so a
-/// single-file launch — which extracts the bundled runtime on first run — still
-/// gives immediate "it heard the click" feedback instead of a dead-looking pause.
-/// Closed by the main form once it is ready to paint.
+/// Minimal borderless loading splash with an animated spinner. Shown on the
+/// UI thread (its own message loop) while the main SkiaSharp form is built
+/// on a worker thread, so a single-file launch — which extracts the bundled
+/// runtime on first run — keeps animating instead of looking dead. The main
+/// form calls <see cref="SignalReady"/> once it is constructed; the splash
+/// then hands off. A safety timer guarantees the splash can never stick
+/// forever even if the signal is missed.
 /// </summary>
 public sealed class SplashForm : Form
 {
     private readonly System.Windows.Forms.Timer _spin = new() { Interval = 80 };
+    private readonly System.Windows.Forms.Timer _safety = new() { Interval = 20000 };
     private float _angle;
     private readonly string _text;
+    private bool _handedOff;
 
     public SplashForm(string text = "PCGauger")
     {
@@ -28,12 +32,26 @@ public sealed class SplashForm : Form
         DoubleBuffered = true;
         Font = new Font("Segoe UI", 12, FontStyle.Regular);
         _spin.Tick += (_, _) => { _angle = (_angle + 30) % 360; Invalidate(); };
+        // Last-resort: if the main form never signals (env quirk / hang),
+        // close the splash so the user is never stuck on a frozen spinner.
+        _safety.Tick += (_, _) => { if (!_handedOff) Close(); };
     }
 
     protected override void OnLoad(System.EventArgs e)
     {
         base.OnLoad(e);
         _spin.Start();
+        _safety.Start();
+    }
+
+    /// <summary>Called by the main form once it is constructed and about to
+    /// take over. Closes the splash on the UI thread.</summary>
+    public void SignalReady()
+    {
+        if (_handedOff) return;
+        _handedOff = true;
+        _safety.Stop();
+        Close();
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -42,7 +60,6 @@ public sealed class SplashForm : Form
         var g = e.Graphics;
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
 
-        // Spinner: an arc that sweeps, leaving a soft gap.
         int cx = Width / 2, cy = 44, r = 16;
         using var track = new Pen(Color.FromArgb(0x33, 0x3A, 0x40), 3);
         g.DrawEllipse(track, cx - r, cy - r, r * 2, r * 2);

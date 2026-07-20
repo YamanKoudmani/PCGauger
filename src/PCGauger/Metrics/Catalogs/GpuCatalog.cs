@@ -17,10 +17,13 @@ public sealed class GpuCatalog : IDeviceCatalog
     {
         get
         {
-            // v1 implicitly displayed adapter 0.
+            // v1 implicitly displayed adapter 0. DxgiFactory.Create() is
+            // timeout-bounded and returns null on a hang, so this never blocks
+            // the caller (e.g. startup) indefinitely.
             try
             {
                 using var factory = DxgiFactory.Create();
+                if (factory == null) return null;
                 using var adapter = factory.EnumAdapter(0);
                 return adapter != null ? "0" : null;
             }
@@ -37,6 +40,7 @@ public sealed class GpuCatalog : IDeviceCatalog
         try
         {
             using var factory = DxgiFactory.Create();
+            if (factory == null) return result; // DXGI hung/unavailable: empty list
             uint index = 0;
             while (true)
             {

@@ -14,11 +14,18 @@ Rendered with SkiaSharp on a WinForms host. Single `.exe`, runs unprivileged (`a
 |------|---------------|--------|
 | **CPU** | Usage %, per-core clock speeds, core/thread count, top process by CPU | `GetSystemTimes`, `CallNtPowerInformation`, `NtQuerySystemInformation` |
 | **RAM** | Used/total memory, committed/pagefile usage, top process by RAM | `GlobalMemoryStatusEx` |
-| **GPU** | Utilization %, VRAM usage, top process by GPU | PDH `GPU Engine` counters, `IDXGIAdapter3::QueryVideoMemoryInfo` |
-| **Disk** | Drive capacity, read/write activity | `GetDiskFreeSpaceEx`, PDH `PhysicalDisk` counters |
-| **Network** | Upload/download throughput | `GetIfTable2` / `GetIfEntry2`, auto-selects the adapter on the default route |
+| **GPU** | Utilization %, VRAM usage, top process by GPU | Per-adapter PDH `GPU Engine` counters (matched by LUID), `IDXGIAdapter3::QueryVideoMemoryInfo` |
+| **Disk** | Drive capacity, read/write activity | `GetDiskFreeSpaceEx`, per-volume PDH `LogicalDisk` counters |
+| **Network** | Upload/download throughput | `GetIfTable2` / `GetIfEntry2`, per-adapter; defaults to the adapter on the default route |
 
 No admin, no drivers, no background services — everything comes from unprivileged Win32/PDH APIs.
+
+### Multi-device tiles
+
+- **Multiple disks, GPUs, and NICs** — add as many Disk, GPU, and Network tiles as you have devices, from the Tiles section of the global settings pane ("＋ Add" per kind).
+- **Per-tile device selector** — each Disk/GPU/Network tile shows its device in the header and can switch devices from its settings pane. Devices already shown on another tile are marked in the list.
+- **Removable tiles** — any Disk/GPU/Network tile can be removed from its settings pane; its settings are remembered if you re-add it later.
+- **Hotplug aware** — if a device disappears (USB drive, disabled adapter), its tile shows a calm "Device unavailable" state and resumes when the device returns; you can re-point the tile at another device anytime.
 
 ### Tiles & layout
 
@@ -42,7 +49,7 @@ No admin, no drivers, no background services — everything comes from unprivile
 
 ### Persistence
 
-All settings live in `%LOCALAPPDATA%\PCGauger\config.json` — theme, units, thresholds, window bounds, tile order, per-tile settings, and detached window positions. Saves are atomic (temp file + move), and a missing or corrupt file falls back to defaults without crashing.
+All settings live in `%LOCALAPPDATA%\PCGauger\config.json` — theme, units, thresholds, window bounds, tile instances and order, per-tile settings (keyed per device, e.g. `Disk:C:`), and detached window positions. Saves are atomic (temp file + move), a missing or corrupt file falls back to defaults without crashing, and v1 configs migrate automatically on first launch.
 
 ### Architecture
 

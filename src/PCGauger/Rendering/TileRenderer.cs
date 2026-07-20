@@ -14,7 +14,7 @@ namespace PCGauger.Rendering;
 /// <see cref="Theme"/> is read live (Theme property) so a theme swap applies
 /// instantly across all tiles, footer, and panes.
 /// </summary>
-public sealed class TileRenderer
+public sealed partial class TileRenderer
 {
     private Theme _theme;
 
@@ -38,9 +38,11 @@ public sealed class TileRenderer
     // Custom/Reset on one row). Clamped to the host window, not the tile.
     private const float PanePad = 12;
     private const float PaneWidth = 200;
-    // Tall enough for: header gap + 5 toggles + divider + "Accent" label + 13
-    // swatches (3 rows of 6/6/1) + Custom/Reset buttons, all inside the card.
-    private const float PaneHeight = 290;
+    // Tall enough for the full non-device content: header gap + 5 toggles +
+    // divider + "Accent" label + 13 swatches (3 rows of 6/6/1) + Custom/Reset
+    // buttons, all inside the card. Bumped from 290 -> 316 so the swatch rows
+    // (which grew to 13) no longer overflow the card's bottom edge.
+    private const float PaneHeight = 316;
     private const float PaneHeaderH = 20;
     // Vertical gap reserved after the "Customize" header before the first row,
     // so the header text never collides with the first toggle. Shared by both
@@ -63,12 +65,12 @@ public sealed class TileRenderer
 
     // ---- tile entry points (settings + accent aware) ----
 
-    public void DrawCpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, uint clockMhz, int physicalCores, int logicalProcessors, IReadOnlyList<(DateTimeOffset, double)> history, TimeSpan historyWindow)
+    public void DrawCpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, uint clockMhz, int physicalCores, int logicalProcessors, IReadOnlyList<(DateTimeOffset, double)> history, TimeSpan historyWindow, string? deviceSubtitle = null)
     {
         bool alert = ThresholdEnabled && usagePct >= ThresholdPercent;
         var v = new TileVisual(TileKind.Cpu, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = historyWindow.TotalSeconds };
         DrawCard(canvas, rect);
-        DrawTitle(canvas, v, "CPU");
+        DrawTitle(canvas, v, "CPU", deviceSubtitle);
         DrawBigValue(canvas, v, usagePct, "%");
         DrawBar(canvas, v, usagePct / 100.0);
         DrawSparkline(canvas, v, history, false);
@@ -76,12 +78,12 @@ public sealed class TileRenderer
         v.Finish(canvas, this);
     }
 
-    public void DrawRamTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, ulong used, ulong total)
+    public void DrawRamTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, ulong used, ulong total, string? deviceSubtitle = null)
     {
         bool alert = ThresholdEnabled && usagePct >= ThresholdPercent;
         var v = new TileVisual(TileKind.Ram, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _ramWindowSeconds };
         DrawCard(canvas, rect);
-        DrawTitle(canvas, v, "RAM");
+        DrawTitle(canvas, v, "RAM", deviceSubtitle);
         DrawBigValue(canvas, v, usagePct, "%");
         DrawBar(canvas, v, usagePct / 100.0);
         DrawSparkline(canvas, v, _ramHistory, false);
@@ -106,12 +108,12 @@ public sealed class TileRenderer
         _gpuWindowSeconds = window.TotalSeconds;
     }
 
-    public void DrawGpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double utilPct, ulong vramUsed, ulong vramBudget)
+    public void DrawGpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double utilPct, ulong vramUsed, ulong vramBudget, string? deviceSubtitle = null)
     {
         bool alert = ThresholdEnabled && utilPct >= ThresholdPercent;
         var v = new TileVisual(TileKind.Gpu, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _gpuWindowSeconds };
         DrawCard(canvas, rect);
-        DrawTitle(canvas, v, "GPU");
+        DrawTitle(canvas, v, "GPU", deviceSubtitle);
         DrawBigValue(canvas, v, utilPct, "%");
         DrawBar(canvas, v, utilPct / 100.0);
         DrawSparkline(canvas, v, _gpuHistory, false);
@@ -142,13 +144,13 @@ public sealed class TileRenderer
         _netWindowSeconds = window.TotalSeconds;
     }
 
-    public void DrawDiskTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, ulong used, ulong total, double bytesPerSec)
+    public void DrawDiskTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, ulong used, ulong total, double bytesPerSec, string? deviceSubtitle = null)
     {
         bool alert = ThresholdEnabled && usagePct >= ThresholdPercent;
         var v = new TileVisual(TileKind.Disk, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _diskWindowSeconds };
         DrawCard(canvas, rect);
-        DrawTitle(canvas, v, "DISK");
-        DrawBigValue(canvas, v, usagePct, "% used");
+        DrawTitle(canvas, v, "DISK", deviceSubtitle);
+        DrawBigValue(canvas, v, usagePct, "%");
         DrawBar(canvas, v, usagePct / 100.0);
         // Dual graph: write (accent) + read (blue) throughput in one sparkline.
         DrawSparkline(canvas, v, _diskWriteHistory, true, _diskReadHistory, TilePalette.DiskRead, "W", "R");
@@ -163,12 +165,12 @@ public sealed class TileRenderer
     /// grows to fill the freed space. NET is exempt from the threshold-alert
     /// path (no usagePct).
     /// </summary>
-    public void DrawNetworkTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double downBps, double upBps, string interfaceName)
+    public void DrawNetworkTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double downBps, double upBps, string interfaceName, string? deviceSubtitle = null)
     {
         // No alert path: NET has no usage percentage.
         var v = new TileVisual(TileKind.Network, s, accent, _theme, false) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _netWindowSeconds };
         DrawCard(canvas, rect);
-        DrawTitle(canvas, v, "NET");
+        DrawTitle(canvas, v, "NET", deviceSubtitle);
         // Big value = download rate, formatted like the disk tile's throughput.
         DrawBigValueLiteral(canvas, v, Format.Rate((ulong)downBps, s.UnitMode, TileKind.Network));
         // ShowUsageBar flag is consumed gracefully: nothing is drawn for the bar
@@ -445,14 +447,38 @@ public sealed class TileRenderer
     // sparkline later fills whatever vertical space remains, so toggling any
     // element off simply collapses its gap and lets the graph grow.
 
-    private void DrawTitle(SKCanvas canvas, TileVisual v, string text)
+    private void DrawTitle(SKCanvas canvas, TileVisual v, string text, string? subtitle = null)
     {
         if (!v.Settings.ShowTitle) return;
         float x = v.Rect.Left + TilePad;
         using var paint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
         using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 15);
         canvas.DrawText(text, x, v.Y + 14, font, paint);
-        v.Y += 30;
+
+        // Multi-instance header subtitle (e.g. "DISK" / "Backup (D:)"): a small
+        // dimmed second line under the kind title. Only drawn when there's room
+        // (the title row reserves 30px; we add ~16px for the subtitle when present
+        // and the tile is tall enough to avoid colliding with the grab/gear corner).
+        if (!string.IsNullOrEmpty(subtitle) && v.Rect.Height >= 96)
+        {
+            using var subPaint = new SKPaint { Color = _theme.TextSecondary.WithAlpha(150), IsAntialias = true };
+            using var subFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 11);
+            // Keep the subtitle clear of the top-right gear + grab-handle
+            // affordances. GearRect.Left = tile.Right - AffordanceInset -
+            // AffordanceSize - 6 - AffordanceSize (i.e. Right - 68), so reserve
+            // that whole zone plus a small gap from the right edge. (The title
+            // itself is left untouched — kind titles are short.)
+            float affordanceReserve = AffordanceInset + AffordanceSize + 6 + AffordanceSize + 6;
+            float subMaxWidth = v.Rect.Width - TilePad - affordanceReserve;
+            if (subMaxWidth < 40) subMaxWidth = 40; // never truncate to nothing on tiny tiles
+            string sub = Truncate(canvas, subtitle!, subMaxWidth, "Segoe UI", 11);
+            canvas.DrawText(sub, x, v.Y + 30, subFont, subPaint);
+            v.Y += 46;
+        }
+        else
+        {
+            v.Y += 30;
+        }
     }
 
     private void DrawBigValue(SKCanvas canvas, TileVisual v, double value, string suffix)
@@ -773,6 +799,32 @@ public sealed class TileRenderer
     }
 
     /// <summary>
+    /// Like <see cref="SettingsPaneRect(SKRect, SKRect)"/> but reserves extra
+    /// vertical space (used by multi-instance tiles for the device row + remove
+    /// button). Falls back to the standard placement when the taller pane cannot
+    /// fit, so a crowded window still shows the base pane.
+    /// </summary>
+    public SKRect? SettingsPaneRect(SKRect tile, SKRect client, float extraHeight)
+    {
+        float height = PaneHeight + extraHeight;
+        var gear = GearRect(tile);
+        float x = gear.Left;
+        if (x + PaneWidth > client.Right - 8) x = client.Right - 8 - PaneWidth;
+        if (x < client.Left + 8) x = client.Left + 8;
+
+        float below = gear.Bottom + 8;
+        float above = gear.Top - 8 - height;
+        float y = below;
+        if (below + height > client.Bottom - 8)
+        {
+            y = above;
+            if (y < client.Top + 8) y = client.Top + 8;
+        }
+        if (y + height > client.Bottom - 8) return null;
+        return new SKRect(x, y, x + PaneWidth, y + height);
+    }
+
+    /// <summary>
     /// All on-screen hit rects of an open settings pane, so the host can route
     /// clicks precisely without re-deriving geometry.
     /// </summary>
@@ -785,6 +837,19 @@ public sealed class TileRenderer
         public SKRect Custom { get; init; }
         public SKRect Reset { get; init; }
         public SKRect Close { get; init; }
+
+        // ---- multi-instance device members (additive; default empty) ----
+        /// <summary>The "Device: <name>" selector row (multi-instance tiles only).</summary>
+        public SKRect DeviceRow { get; init; } = SKRect.Empty;
+        /// <summary>The open dropdown sub-card rect (empty when closed).</summary>
+        public SKRect DeviceDropdown { get; init; } = SKRect.Empty;
+        /// <summary>Per visible dropdown item hit rects (for hit-testing).</summary>
+        public IReadOnlyList<SKRect> DeviceDropdownItems { get; init; } = Array.Empty<SKRect>();
+        /// <summary>Up / down overflow-arrow hit rects (empty when list fits).</summary>
+        public SKRect DeviceDropdownUp { get; init; } = SKRect.Empty;
+        public SKRect DeviceDropdownDown { get; init; } = SKRect.Empty;
+        /// <summary>The danger-tinted "Remove tile" button rect (multi-instance tiles only).</summary>
+        public SKRect RemoveTile { get; init; } = SKRect.Empty;
     }
 
     /// <summary>
@@ -941,6 +1006,23 @@ public sealed class TileRenderer
         // One hit rect per tile-kind chip in the "Tiles" section, in canonical
         // TileKind order (Cpu, Ram, Gpu, Disk, Network).
         public IReadOnlyList<SKRect> TileChips { get; init; } = Array.Empty<SKRect>();
+
+        // ---- instance-aware Tiles section members (additive; default empty) ----
+        /// <summary>Management rows for Disk/GPU/Network: kind label + count + ＋ Add (full-row hit area).</summary>
+        public IReadOnlyList<SKRect> AddRows { get; init; } = Array.Empty<SKRect>();
+        /// <summary>The "＋ Add" button rects (one per AddRows entry).</summary>
+        public IReadOnlyList<SKRect> AddButtons { get; init; } = Array.Empty<SKRect>();
+        /// <summary>The open device-picker sub-card rect (empty when no picker open).</summary>
+        public SKRect Picker { get; init; } = SKRect.Empty;
+        /// <summary>Per visible picker item hit rects.</summary>
+        public IReadOnlyList<SKRect> PickerItems { get; init; } = Array.Empty<SKRect>();
+        /// <summary>Picker up / down overflow-arrow hit rects (empty when list fits).</summary>
+        public SKRect PickerUp { get; init; } = SKRect.Empty;
+        public SKRect PickerDown { get; init; } = SKRect.Empty;
+        /// <summary>Picker close (×) hit rect.</summary>
+        public SKRect PickerClose { get; init; } = SKRect.Empty;
+        /// <summary>Picker empty-state text hit rect (when no devices remain).</summary>
+        public SKRect PickerEmpty { get; init; } = SKRect.Empty;
     }
 
     /// <summary>
@@ -1188,7 +1270,7 @@ public sealed class TileRenderer
 
     private void DrawStepper(SKCanvas canvas, SKRect minus, SKRect value, SKRect plus, string valueText, SKColor accent)
     {
-        DrawStepperButton(canvas, minus, "−", accent);
+        DrawStepperMinus(canvas, minus, accent);
         DrawStepperButton(canvas, plus, "+", accent);
         // Fixed-width value slot (display only).
         using var rr = new SKRoundRect(value, 8);
@@ -1209,6 +1291,28 @@ public sealed class TileRenderer
         using var tFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 16);
         float tw = tFont.MeasureText(glyph);
         canvas.DrawText(glyph, r.MidX - tw / 2, r.MidY + 6, tFont, tPaint);
+    }
+
+    /// <summary>
+    /// Draws the stepper's minus button with a STROKED horizontal line instead
+    /// of the "−" (U+2212) glyph. The minus sign is not guaranteed to be present
+    /// in Segoe UI at every rendered size, whereas a stroked line always is.
+    /// </summary>
+    private void DrawStepperMinus(SKCanvas canvas, SKRect r, SKColor accent)
+    {
+        using var rr = new SKRoundRect(r, 8);
+        using var p = new SKPaint { Color = TilePalette.Soft(accent), Style = SKPaintStyle.Fill, IsAntialias = true };
+        canvas.DrawRoundRect(rr, p);
+        using var tPaint = new SKPaint
+        {
+            Color = accent,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1.8f,
+            IsAntialias = true,
+            StrokeCap = SKStrokeCap.Round,
+        };
+        float m = Math.Min(r.Width, r.Height) * 0.22f;
+        canvas.DrawLine(r.MidX - m, r.MidY, r.MidX + m, r.MidY, tPaint);
     }
 
     /// <summary>

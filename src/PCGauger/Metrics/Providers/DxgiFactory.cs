@@ -15,6 +15,7 @@ namespace PCGauger.Metrics.Providers;
 internal static class DxgiFactory
 {
     private static readonly Guid IID_IDXGIFactory1 = new("770AAE78-F26F-4DBA-A829-253C83D1B387");
+    private static readonly Guid IID_IDXGIAdapter1 = new("29038f61-3839-4626-91fd-086879011a05");
     private static readonly Guid IID_IDXGIAdapter3 = new("645967A4-1392-4310-A798-8053CE3E93FD");
 
     [DllImport("dxgi.dll")]
@@ -31,6 +32,40 @@ internal static class DxgiFactory
         uint nodeIndex,
         NativeMethods.DXGI_MEMORY_SEGMENT_GROUP memorySegmentGroup,
         out NativeMethods.DXGI_QUERY_VIDEO_MEMORY_INFO pVideoMemoryInfo);
+
+    // IDXGIAdapter1::GetDesc1 (vtable slot 10) — gives the adapter description
+    // and LUID used to correlate this adapter with its PDH GPU Engine instances.
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int GetDesc1Delegate(IntPtr adapter, out DXGI_ADAPTER_DESC1 pDesc);
+
+    /// <summary>
+    /// DXGI_ADAPTER_DESC1 (d3dcommon.h). Description is a fixed 128-char WCHAR
+    /// buffer; Luid is the adapter's locally-unique identifier that PDH embeds
+    /// in GPU Engine instance names as "luid_0x{HighPart:X8}_0x{LowPart:X8}".
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct DXGI_ADAPTER_DESC1
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string Description;
+        public uint VendorId;
+        public uint DeviceId;
+        public uint SubSysId;
+        public uint Revision;
+        public UIntPtr DedicatedVideoMemory;
+        public UIntPtr DedicatedSystemMemory;
+        public UIntPtr SharedSystemMemory;
+        public LUID Luid;
+        public uint Flags;
+    }
+
+    /// <summary>Win32 LUID (locally unique identifier).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LUID
+    {
+        public uint LowPart;
+        public int HighPart;
+    }
 
     public static DxgiFactoryHandle Create()
     {
@@ -86,6 +121,33 @@ internal static class DxgiFactory
             finally
             {
                 Marshal.Release(adapter3);
+            }
+        }
+
+        /// <summary>
+        /// Read IDXGIAdapter1::GetDesc1. Returns null on failure. Exposes the
+        /// adapter description (DisplayName) and LUID (PDH instance correlation).
+        /// </summary>
+        public DXGI_ADAPTER_DESC1? GetDesc1()
+        {
+            // Query interface for IDXGIAdapter1 (same object already supports
+            // IDXGIAdapter3; GetDesc1 lives on the base IDXGIAdapter1).
+            var iid = IID_IDXGIAdapter1;
+            int hr = Marshal.QueryInterface(_ptr, ref iid, out var adapter1);
+            if (hr < 0) return null;
+            try
+            {
+                // IDXGIAdapter1 vtable slot 10.
+                IntPtr vtable1 = Marshal.ReadIntPtr(adapter1);
+                IntPtr slot = Marshal.ReadIntPtr(vtable1 + 10 * IntPtr.Size);
+                var del = Marshal.GetDelegateForFunctionPointer<GetDesc1Delegate>(slot);
+                hr = del(adapter1, out var desc);
+                if (hr < 0) return null;
+                return desc;
+            }
+            finally
+            {
+                Marshal.Release(adapter1);
             }
         }
 

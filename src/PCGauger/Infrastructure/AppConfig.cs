@@ -91,8 +91,13 @@ public sealed class AppConfig
     // Global sparkline time span in seconds (shared by every tile). Default 5m.
     public int GraphWindowSeconds { get; set; } = 300;
 
-    // Per-tile settings keyed by TileKind name.
+    // Per-tile settings keyed by ConfigKey ("Kind" or "Kind:DeviceId").
     public Dictionary<string, TileConfig> Tiles { get; set; } = new();
+
+    /// <summary>ConfigKeys of every created instance (enabled or not), in
+    /// creation order. Non-empty marks a v2 (migrated) config; an empty list on
+    /// a file that has Tiles entries is treated as a v1 file needing migration.</summary>
+    public List<string> TileInstances { get; set; } = new();
 
     // Custom display order of tiles (TileKind names). Empty = use canonical
     // order. Persisted on every committed reorder and applied at startup and on
@@ -119,12 +124,30 @@ public sealed class AppConfig
         return tc;
     }
 
+    /// <summary>Per-instance settings lookup by ConfigKey. Creates a default
+    /// entry when missing so callers can always read/write safely.</summary>
+    public TileConfig Tile(string configKey)
+    {
+        if (!Tiles.TryGetValue(configKey, out var tc))
+        {
+            tc = new TileConfig();
+            Tiles[configKey] = tc;
+        }
+        return tc;
+    }
+
     public void SetDetachedPosition(TileKind kind, System.Drawing.Point p)
         => DetachedPositions[kind.ToString()] = new[] { p.X, p.Y };
 
+    public void SetDetachedPosition(string configKey, System.Drawing.Point p)
+        => DetachedPositions[configKey] = new[] { p.X, p.Y };
+
     public bool TryGetDetachedPosition(TileKind kind, out System.Drawing.Point p)
+        => TryGetDetachedPosition(kind.ToString(), out p);
+
+    public bool TryGetDetachedPosition(string configKey, out System.Drawing.Point p)
     {
-        if (DetachedPositions.TryGetValue(kind.ToString(), out var a) && a.Length == 2)
+        if (DetachedPositions.TryGetValue(configKey, out var a) && a.Length == 2)
         {
             p = new System.Drawing.Point(a[0], a[1]);
             return true;

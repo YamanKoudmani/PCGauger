@@ -28,6 +28,20 @@ public sealed class TopProcessProvider : IMetricProvider
     private string _topGpuName = "-";
     private double _topGpuPct;
 
+    // Disk: top process by I/O throughput (bytes/sec), read via the unprivileged
+    // "Process" performance counter category ("IO Data Bytes/sec" = read+write
+    // combined). Instance names are process names; duplicates get a "#n" suffix
+    // which we strip for display. Cheap and admin-free.
+    //
+    // Counters are CACHED across polls (keyed by instance name): a
+    // PerformanceCounter returns 0 on its first NextValue() because there is
+    // no prior sample to delta against, so a fresh counter every poll would
+    // always read 0 and the disk top would stay "-". Caching lets the
+    // 2nd+ sample report the real rate. Gone instances are disposed.
+    private string _topDiskName = "-";
+    private double _topDiskBps;
+    private readonly Dictionary<string, PerformanceCounter> _diskCounters = new();
+
     // Cache pid -> friendly name. Lookups are expensive (Process construction),
     // so we keep the last good name even across polls. Dead pids are pruned
     // lazily when name resolution fails.
@@ -49,6 +63,7 @@ public sealed class TopProcessProvider : IMetricProvider
 
         UpdateCpuRam(elapsedSec);
         UpdateGpu();
+        UpdateDisk();
     }
 
     private void UpdateCpuRam(double elapsedSec)
@@ -163,6 +178,68 @@ public sealed class TopProcessProvider : IMetricProvider
         _topGpuPct = topGpuPct;
     }
 
+    private void UpdateDisk()
+    {
+        string topDisk = "-";
+        double topDiskBps = 0;
+
+        try
+        {
+            // Refresh the cached counter set against the live instance list.
+            // New instances get a counter (its first NextValue() returns 0, the
+            // next poll returns the real rate); gone instances are disposed.
+            var category = new PerformanceCounterCategory("Process");
+            string[] instances = category.GetInstanceNames();
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var inst in instances)
+            {
+                if (inst.Equals("_Total", StringComparison.OrdinalIgnoreCase)) continue;
+                seen.Add(inst);
+                if (!_diskCounters.TryGetValue(inst, out var pc))
+                {
+                    try { pc = new PerformanceCounter("Process", "IO Data Bytes/sec", inst, true); }
+                    catch { continue; }
+                    _diskCounters[inst] = pc;
+                }
+
+                try
+                {
+                    // Cached counter: 2nd+ call returns the real bytes/sec delta.
+                    double bps = pc.NextValue();
+                    if (bps > topDiskBps)
+                    {
+                        topDiskBps = bps;
+                        // Strip the "#n" duplicate suffix for a clean display name.
+                        int hash = inst.IndexOf('#');
+                        topDisk = hash < 0 ? inst : inst.Substring(0, hash);
+                    }
+                }
+                catch
+                {
+                    // Instance vanished mid-read — drop it next refresh.
+                }
+            }
+
+            // Dispose counters whose process has exited.
+            foreach (var key in _diskCounters.Keys.ToArray())
+            {
+                if (!seen.Contains(key))
+                {
+                    try { _diskCounters[key].Dispose(); } catch { }
+                    _diskCounters.Remove(key);
+                }
+            }
+        }
+        catch
+        {
+            // Performance counters unavailable (rare) — keep last good values.
+        }
+
+        _topDiskName = topDisk;
+        _topDiskBps = topDiskBps;
+    }
+
     /// <summary>
     /// Parse the owning pid from a GPU Engine instance name of the form
     /// "pid_1234_luid_0x..._engtype_3D". Returns -1 if the token is missing
@@ -222,6 +299,8 @@ public sealed class TopProcessProvider : IMetricProvider
         yield return Metric.Text("proc.topram.bytes", "Top RAM", _topRamBytes, "B");
         yield return Metric.Text("proc.topgpu.name", "Top GPU", 0, _topGpuName);
         yield return Metric.Text("proc.topgpu.pct", "Top GPU %", _topGpuPct, "%");
+        yield return Metric.Text("proc.topdisk.name", "Top Disk", 0, _topDiskName);
+        yield return Metric.Text("proc.topdisk.bps", "Top Disk", _topDiskBps, "B/s");
     }
 
     public string TopCpuName => _topCpuName;
@@ -230,10 +309,17 @@ public sealed class TopProcessProvider : IMetricProvider
     public ulong TopRamBytes => _topRamBytes;
     public string TopGpuName => _topGpuName;
     public double TopGpuPct => _topGpuPct;
+    public string TopDiskName => _topDiskName;
+    public double TopDiskBps => _topDiskBps;
 
     public void Dispose()
     {
         if (_gpuCounter != IntPtr.Zero) NativeMethods.PdhRemoveCounter(_gpuCounter);
         if (_gpuQuery != IntPtr.Zero) NativeMethods.PdhCloseQuery(_gpuQuery);
+        foreach (var pc in _diskCounters.Values)
+        {
+            try { pc.Dispose(); } catch { }
+        }
+        _diskCounters.Clear();
     }
 }

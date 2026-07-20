@@ -1,4 +1,5 @@
 using SkiaSharp;
+using PCGauger.Metrics;
 
 namespace PCGauger.Rendering;
 
@@ -28,16 +29,49 @@ public sealed class Tile
     public Action<SKCanvas, SKRect> Draw { get; }
 
     /// <summary>
+    /// Device identity for multi-instance kinds (Disk/Gpu/Network): the bound
+    /// <see cref="DeviceDescriptor.Id"/>. Empty for singleton kinds (Cpu/Ram).
+    /// </summary>
+    public string InstanceId { get; private set; }
+
+    /// <summary>Persistence key: Kind name for singletons, "Kind:DeviceId" for instances.</summary>
+    public string ConfigKey => InstanceId.Length == 0 ? Kind.ToString() : $"{Kind}:{InstanceId}";
+
+    /// <summary>True when this tile can be pointed at a different device (multi-instance kinds).</summary>
+    public bool IsDeviceSelectable => DeviceSource != null;
+
+    /// <summary>Device list feeding the settings-pane selector. Null for singleton kinds. Set by MainForm.</summary>
+    public Func<IReadOnlyList<DeviceDescriptor>>? DeviceSource { get; set; }
+
+    /// <summary>Called by the settings pane when the user picks a different device (arg = DeviceDescriptor.Id).</summary>
+    public Action<string>? DevicePicked { get; set; }
+
+    /// <summary>Bound-device label shown as the header subtitle and in the settings pane. Null when unknown.</summary>
+    public string? DeviceDisplayName { get; set; }
+
+    /// <summary>False when the bound device is currently missing (unplugged/disabled) — the tile renders its unavailable state.</summary>
+    public bool DeviceAvailable { get; set; } = true;
+
+    /// <summary>
     /// Per-tile appearance/content state. Travels with the tile when it is
     /// detached, since it lives here.
     /// </summary>
     public TileSettings Settings { get; } = new();
 
-    public Tile(TileKind kind, string title, Action<SKCanvas, SKRect> draw)
+    public Tile(TileKind kind, string title, Action<SKCanvas, SKRect> draw, string instanceId = "")
     {
         Kind = kind;
         Title = title;
         Draw = draw;
+        InstanceId = instanceId;
+    }
+
+    /// <summary>Re-points this tile at a different device, preserving settings. Called by MainForm on rebind.</summary>
+    public void UpdateDeviceBinding(string instanceId, string? displayName, bool available)
+    {
+        InstanceId = instanceId;
+        DeviceDisplayName = displayName;
+        DeviceAvailable = available;
     }
 }
 

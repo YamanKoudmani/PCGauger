@@ -97,8 +97,11 @@ public sealed class MainForm : Form
     private Point _dragCursor;      // last cursor (client) while dragging
     private const int DragThreshold = 6;
 
-    public MainForm()
+    private readonly SplashForm? _splash;
+
+    public MainForm(SplashForm? splash = null)
     {
+        _splash = splash;
         _config = AppConfig.Load();
 
         Text = "PCGauger";
@@ -178,7 +181,13 @@ public sealed class MainForm : Form
         ApplyWindowBounds();
         // Re-assert once the window is shown, in case the mini panel wasn't
         // enumerated yet when the constructor ran.
-        Shown += (_, _) => ApplyWindowBounds();
+        Shown += (_, _) =>
+        {
+            ApplyWindowBounds();
+            // The form is visible and painted — dismiss the loading splash
+            // (covers the single-file runtime extraction pause on first run).
+            _splash?.BeginInvoke((Action)(() => _splash.Close()));
+        };
 
         _renderTimer = new System.Windows.Forms.Timer { Interval = 33 };
         _renderTimer.Tick += (_, _) => _surface.Invalidate();
@@ -1524,6 +1533,11 @@ public sealed class MainForm : Form
         float x = 14;
         float gap = 22;
 
+        // Hard right boundary: leave a gap before the footer gear so the
+        // Top text can never collide with the gear/close buttons.
+        float maxRight = FooterGearRect().Left - 10;
+        const float FadeWidth = 40; // px of smooth dissolve before the boundary
+
         // Effective accent per kind (honors per-tile color overrides).
         SKColor AccentOf(TileKind kind)
         {
@@ -1532,19 +1546,51 @@ public sealed class MainForm : Form
         }
 
         // "CPU Top: chrome 12.5%" — muted label, bold measurement in the tile's color.
+        // The value is truncated with an ellipsis if it would reach the boundary.
         void Segment(string label, string value, SKColor color)
         {
             canvas.DrawText(label, x, cy, labelFont, labelPaint);
             x += labelFont.MeasureText(label);
+
+            float avail = maxRight - x;
+            string drawn = value;
+            if (valueFont.MeasureText(value) > avail && avail > 0)
+            {
+                // Trim char-by-char and append an ellipsis so long process
+                // names fade out gracefully instead of running under the buttons.
+                while (drawn.Length > 1 && valueFont.MeasureText(drawn + "…") > avail)
+                    drawn = drawn.Substring(0, drawn.Length - 1);
+                drawn += "…";
+            }
+            else if (avail <= 0)
+            {
+                return; // no room left at all — skip this segment
+            }
+
             using var cp = new SKPaint { Color = color, IsAntialias = true };
-            canvas.DrawText(value, x, cy, valueFont, cp);
-            x += valueFont.MeasureText(value) + gap;
+            canvas.DrawText(drawn, x, cy, valueFont, cp);
+            x += valueFont.MeasureText(drawn) + gap;
         }
 
         Segment("CPU Top: ", $"{cpuName} {Format.Percent(cpuPct)}", AccentOf(TileKind.Cpu));
         Segment("RAM Top: ", $"{ramName} {Format.Size(ramBytes, TileUnitMode.Auto, TileKind.Ram)}", AccentOf(TileKind.Ram));
         Segment("GPU Top: ", $"{gpuName} {Format.Percent(gpuPct)}", AccentOf(TileKind.Gpu));
         Segment("Disk Top: ", $"{diskName} {Format.Rate((ulong)diskBps, TileUnitMode.Auto, TileKind.Disk)}", AccentOf(TileKind.Disk));
+
+        // Smooth fade: dissolve any text approaching the boundary into the band
+        // color so it never hard-clips against the gear/close buttons.
+        if (x > maxRight - FadeWidth)
+        {
+            float fadeStart = Math.Max(maxRight - FadeWidth, 0);
+            using var fade = new SKPaint();
+            fade.Shader = SKShader.CreateLinearGradient(
+                new SKPoint(fadeStart, bandTop),
+                new SKPoint(maxRight, bandTop),
+                new[] { _theme.FooterBand.WithAlpha(0), _theme.FooterBand.WithAlpha(255) },
+                new[] { 0f, 1f },
+                SKShaderTileMode.Clamp);
+            canvas.DrawRect(fadeStart, bandTop, maxRight - fadeStart, FooterHeight, fade);
+        }
 
         // Footer gear at far right.
         _renderer.DrawGearAt(canvas, FooterGearRect(), _hoverFooterGear, _theme.Accent);

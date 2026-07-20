@@ -9,6 +9,13 @@ internal static class Program
     {
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         ApplicationConfiguration.Initialize();
-        Application.Run(new MainForm());
+
+        // Show a loading splash the instant the runtime is up, so a
+        // single-file launch (which extracts the bundled runtime on first
+        // run) still gives immediate feedback instead of a dead-looking
+        // pause. The main form closes it once it is ready to paint.
+        using var splash = new SplashForm();
+        splash.Show();
+        Application.Run(new MainForm(splash));
     }
 }

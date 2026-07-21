@@ -36,6 +36,7 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
     private IntPtr _writeCounter;
     private bool _countersOpened;
     private int _consecutiveFailures;
+    private int _reopenCooldown;
 
     private ulong _totalBytes;
     private ulong _freeBytes;
@@ -48,10 +49,12 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
     // native PDH handles. Set only in Dispose; read on the hot path.
     private int _disposed;
 
-    // Cap on the media probe in the ctor. A bad/removable volume can make
-    // DriveInfo.IsReady block, so the probe runs off-thread and is abandoned
-    // past this rather than hanging startup.
-    private const int ProbeTimeoutMs = 1000;
+    // Consecutive PDH-collect failures before the tile flips to "unavailable".
+    // A transient glitch (one dropped read, a spun-up HDD) stays invisible.
+    private const int FailureThreshold = 3;
+    // Polls to wait before re-opening counters after a sustained failure, so a
+    // genuinely-removed volume isn't re-opened every second (counter churn).
+    private const int ReopenCooldownPolls = 5;
 
     /// <summary>
     /// True while the drive is present, ready, and its PDH counters are open.
@@ -66,12 +69,12 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
     }
 
     /// <summary>
-    /// Deferred-resolution constructor. Normalizes the drive path and probes
-    /// availability UNLESS <paramref name="deferResolution"/> is true — that's
-    /// how this overload avoids the blocking <see cref="DriveInfo.IsReady"/>
-    /// call on the UI thread at startup (DeviceAvailable starts false). The
-    /// caller invokes <see cref="BeginResolve"/> after the form is shown.
-    /// Counters are opened lazily on first successful update regardless.
+    /// Deferred-resolution constructor. Normalizes the drive path. Availability is
+    /// OPTIMISTIC (true) — we trust the volume until a PDH read actually fails,
+    /// rather than gating on <see cref="DriveInfo.IsReady"/> (a blocking media
+    /// probe that flaps on power-managed/removable volumes). Counters are opened
+    /// lazily by <see cref="Update"/> / <see cref="BeginResolve"/>; no media probe
+    /// happens here, so the UI thread is never blocked at startup.
     /// </summary>
     public StorageProvider(string drive, bool deferResolution)
     {
@@ -88,54 +91,50 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
         _pdhInstance = _drive.TrimEnd('\\');
         if (_pdhInstance.Length == 0) _pdhInstance = "C:";
 
-        // Probe availability immediately unless deferred; counters are opened
-        // lazily on first successful update so a not-yet-ready drive doesn't
-        // fail construction. When deferred, the UI thread is never blocked on a
-        // slow/removable volume — BeginResolve() probes off-thread later.
-        if (!deferResolution) ProbeAvailability();
+        DeviceAvailable = true;
+        if (!deferResolution) TryOpenCounters();
     }
 
-    private void ProbeAvailability()
+    /// <summary>
+    /// Best-effort capacity read using <see cref="DriveInfo.TotalSize"/>/
+    /// <see cref="DriveInfo.AvailableFreeSpace"/> (volume geometry), NOT
+    /// <see cref="DriveInfo.IsReady"/>. Keeps last-good values on any error and
+    /// never flips availability — presence is governed by the PDH read in
+    /// <see cref="Update"/>.
+    /// </summary>
+    private void TryReadCapacity()
     {
         try
         {
-            // Run the media probe off-thread with a timeout: a missing/removable
-            // volume can make DriveInfo.IsReady block, which would otherwise hang
-            // construction (and thus startup) on the UI thread.
-            var task = Task.Run(() =>
-            {
-                var di = new DriveInfo(_drive);
-                return di.IsReady;
-            });
-            DeviceAvailable = task.Wait(ProbeTimeoutMs) && task.Result;
-            if (DeviceAvailable) _consecutiveFailures = 0;
+            var di = new DriveInfo(_drive);
+            _totalBytes = (ulong)di.TotalSize;
+            _freeBytes = (ulong)di.AvailableFreeSpace;
         }
         catch
         {
-            DeviceAvailable = false;
+            // Drive momentarily unreadable or gone: keep last-good capacity.
         }
     }
 
     /// <summary>
-    /// Open the PDH counters for this volume. Returns false (and leaves
-    /// DeviceAvailable false) if the drive is gone or counter setup fails.
-    /// Safe to call repeatedly; only opens once per successful probe.
+    /// Open the PDH counters for this volume if not already open. Does NOT probe
+    /// DriveInfo first — opening counters is cheap and doesn't touch the media.
+    /// On failure the counters are closed and a re-open cooldown starts so a
+    /// genuinely-removed volume isn't re-opened every poll.
     /// </summary>
-    private bool EnsureCounters()
+    private bool TryOpenCounters()
     {
-        ProbeAvailability();
-        if (!DeviceAvailable)
+        if (_countersOpened) return true;
+        if (_reopenCooldown > 0)
         {
-            CloseCounters();
+            _reopenCooldown--;
             return false;
         }
-
-        if (_countersOpened) return true;
 
         if (NativeMethods.PdhOpenQuery(null, IntPtr.Zero, out _query) != 0)
         {
             _query = IntPtr.Zero;
-            DeviceAvailable = false;
+            _reopenCooldown = ReopenCooldownPolls;
             return false;
         }
 
@@ -154,7 +153,7 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
         if (!ok)
         {
             CloseCounters();
-            DeviceAvailable = false;
+            _reopenCooldown = ReopenCooldownPolls;
             return false;
         }
 
@@ -180,66 +179,29 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
         // Disposed guard: never touch native handles after CloseCounters.
         if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
 
-        // Capacity/free from DriveInfo. If the drive vanishes transiently, keep
-        // last-good values and skip PDH reads — only close counters and mark
-        // unavailable after 3 consecutive failures.
-        try
-        {
-            var di = new DriveInfo(_drive);
-            if (di.IsReady)
-            {
-                _totalBytes = (ulong)di.TotalSize;
-                _freeBytes = (ulong)di.AvailableFreeSpace;
-                _consecutiveFailures = 0;
-            }
-            else
-            {
-                _consecutiveFailures++;
-                if (_consecutiveFailures >= 3)
-                {
-                    DeviceAvailable = false;
-                    _totalBytes = 0;
-                    _freeBytes = 0;
-                    _loadPct = 0;
-                    _readBytesPerSec = 0;
-                    _writeBytesPerSec = 0;
-                    CloseCounters();
-                    return;
-                }
-                // Transient glitch: keep last-good values, skip PDH read.
-                return;
-            }
-        }
-        catch
+        // Lazily open counters. If they can't open yet, count it and back off —
+        // availability only flips after a sustained run of failures.
+        if (!TryOpenCounters())
         {
             _consecutiveFailures++;
-            if (_consecutiveFailures >= 3)
-            {
+            if (_consecutiveFailures >= FailureThreshold)
                 DeviceAvailable = false;
-                _totalBytes = 0;
-                _freeBytes = 0;
-                _loadPct = 0;
-                _readBytesPerSec = 0;
-                _writeBytesPerSec = 0;
-                CloseCounters();
-                return;
-            }
-            // Transient error: keep last-good values, skip PDH read.
             return;
         }
 
-        if (!EnsureCounters())
-        {
-            _loadPct = 0;
-            _readBytesPerSec = 0;
-            _writeBytesPerSec = 0;
-            return;
-        }
+        // Capacity is best-effort and independent of availability.
+        TryReadCapacity();
 
-        DeviceAvailable = true;
-
+        // The PDH collect is the real presence signal: it succeeds only while the
+        // LogicalDisk instance exists. A single failed collect is a transient
+        // glitch (keep last-good, leave counters open); a sustained run flips the
+        // tile to "unavailable", closes the counters, and starts a re-open
+        // cooldown so they re-open on the drive's return without per-poll churn.
         if (_query != IntPtr.Zero && NativeMethods.PdhCollectQueryData(_query) == 0)
         {
+            _consecutiveFailures = 0;
+            DeviceAvailable = true;
+
             if (_timeCounter != IntPtr.Zero &&
                 NativeMethods.PdhGetFormattedCounterValue(_timeCounter, NativeMethods.PDH_FMT_DOUBLE, out _, out var tv) == 0)
             {
@@ -253,6 +215,20 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
             if (_writeCounter != IntPtr.Zero &&
                 NativeMethods.PdhGetFormattedCounterValue(_writeCounter, NativeMethods.PDH_FMT_DOUBLE, out _, out var wv) == 0)
                 _writeBytesPerSec = wv.DoubleValue;
+        }
+        else
+        {
+            _consecutiveFailures++;
+            if (_consecutiveFailures >= FailureThreshold)
+            {
+                DeviceAvailable = false;
+                _loadPct = 0;
+                _readBytesPerSec = 0;
+                _writeBytesPerSec = 0;
+                CloseCounters();
+                _reopenCooldown = ReopenCooldownPolls;
+            }
+            // else: transient glitch — keep last-good values, leave counters open.
         }
     }
 
@@ -276,11 +252,11 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
     public double WriteBytesPerSec => _writeBytesPerSec;
 
     /// <summary>
-    /// Begins asynchronous device resolution (off-thread, timeout-bounded).
-    /// Non-blocking; safe to call from the UI thread. Probes the volume and
-    /// opens PDH counters on a worker thread, flipping <see cref="DeviceAvailable"/>
-    /// when it lands. Even without this call, <see cref="Update"/> re-probes via
-    /// <see cref="EnsureCounters"/> on first poll, so the tile always recovers.
+    /// Begins asynchronous device resolution (off-thread). Non-blocking; safe to
+    /// call from the UI thread. Warms the counters and capacity on a worker
+    /// thread. Availability is governed by the PDH collect in <see cref="Update"/>,
+    /// which re-runs the same open each poll, so the tile always recovers
+    /// regardless of when this lands.
     /// </summary>
     public void BeginResolve()
     {
@@ -288,8 +264,7 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
         Task.Run(() =>
         {
             if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
-            ProbeAvailability();
-            if (DeviceAvailable) EnsureCounters();
+            if (TryOpenCounters()) TryReadCapacity();
         });
     }
 

@@ -187,26 +187,40 @@ public sealed class GpuProvider : IMetricProvider, IAsyncResolvable
     }
 
     /// <summary>
-    /// Retries <see cref="TryResolveAdapter"/> on a worker thread after a ctor
-    /// timeout, so a GPU that becomes available (driver recovers, RDP session
-    /// attaches) still populates the tile. No-ops if disposed or already
-    /// resolved. Never throws.
+    /// Retries <see cref="TryResolveAdapter"/> on a worker thread with exponential
+    /// backoff, so a GPU that becomes available (driver recovers, cold driver
+    /// finishing init, RDP session attaches) still populates the tile. The old
+    /// ONE-SHOT retry meant a single slow resolve (e.g. a driver exceeding the
+    /// 1.5s per-call DXGI timeout at startup) left the GPU permanently unavailable
+    /// until the app was restarted. No-ops if disposed or already resolved.
+    /// Never throws and never blocks the UI thread.
     /// </summary>
     private void ResolveLater()
     {
         if (_adapterIndex < 0) return;
-        Task.Run(() =>
+        Task.Run(async () =>
         {
-            // Bail if we were disposed while queued, or resolution already landed.
-            if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
-            if (DeviceAvailable) return;
-            if (!TryResolveAdapter(out var name, out var frag, out var zero)) return;
-            if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
+            int delayMs = 500;
+            // ~40s of coverage (0.5+1+2+4+8+10+10+10s) for driver initialization.
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                // Bail if we were disposed while queued, or resolution already landed.
+                if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
+                if (DeviceAvailable) return;
 
-            _luidFragment = frag;
-            AdapterName = name;
-            DeviceAvailable = frag != null && !zero;
-            if (DeviceAvailable) OpenCounters();
+                if (TryResolveAdapter(out var name, out var frag, out var zero))
+                {
+                    if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
+                    _luidFragment = frag;
+                    AdapterName = name;
+                    DeviceAvailable = frag != null && !zero;
+                    if (DeviceAvailable) OpenCounters();
+                    return;
+                }
+
+                await Task.Delay(delayMs);
+                delayMs = Math.Min(delayMs * 2, 10000);
+            }
         });
     }
 

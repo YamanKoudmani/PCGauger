@@ -12,18 +12,23 @@ namespace PCGauger.Infrastructure;
 ///
 /// Threading contract: <see cref="Add"/>, <see cref="Remove"/>, <see cref="Tick"/>
 /// and <see cref="Dispose"/> all serialize on <see cref="_lock"/>. The lock
-/// protects ONLY the provider-set snapshot and the <see cref="_latest"/> write —
-/// NOT the blocking per-provider <c>Update</c>/<c>GetMetrics</c> calls. A Tick
-/// takes the lock just long enough to copy the current provider keys into a
-/// local list and to store each completed snapshot; the actual device I/O
-/// (DXGI / DriveInfo / NIC enumeration inside Update) runs OUTSIDE the lock on
-/// that local snapshot. This means a slow provider can never block a UI-thread
-/// <see cref="Add"/> or <see cref="Remove"/>. Because the snapshot is taken
-/// under the lock and Remove drops the provider from <c>_providers</c> under the
-/// same lock, no Tick will call Update on a provider removed after Remove
-/// returns, so callers may <see cref="IDisposable.Dispose"/> the provider
-/// immediately after Remove returns — the lock guarantees no Tick is executing
-/// it.
+/// protects the provider-set snapshot and the <see cref="_latest"/> write.
+///
+/// Per-provider isolation: a <see cref="Tick"/> does NOT run providers serially.
+/// It launches each provider's <c>Update</c>/<c>GetMetrics</c> on its OWN pool
+/// task and returns immediately, so a slow or briefly-blocking provider
+/// (process enumeration, HDD spin-up, a wedged PDH/DXGI call) runs at its own
+/// pace and can never starve the other providers — the original serial loop let
+/// one ~30s <c>TopProcessProvider</c> freeze every tile at startup. A
+/// per-provider re-entrancy flag skips launching a new update while that
+/// provider's previous one is still running, so a provider's <c>Update</c> never
+/// overlaps itself.
+///
+/// Remove-then-Dispose safety: <see cref="Remove"/> drains (bounded) the
+/// provider's in-flight update before returning, so the caller may
+/// <see cref="IDisposable.Dispose"/> the provider immediately after Remove
+/// returns without a use-after-free on its native handles. Providers also keep
+/// their own <c>_disposed</c> guards as a second line of defense.
 /// </summary>
 public sealed class MetricPoller : IDisposable
 {
@@ -33,8 +38,19 @@ public sealed class MetricPoller : IDisposable
     private readonly System.Threading.Timer _timer;
     private readonly ConcurrentDictionary<IMetricProvider, IReadOnlyList<Metric>> _latest =
         new(ReferenceEqualityComparer.Instance);
+    private readonly ConcurrentDictionary<IMetricProvider, ProviderState> _states =
+        new(ReferenceEqualityComparer.Instance);
     private readonly object _lock = new();
     private readonly CancellationTokenSource _cts = new();
+
+    /// <summary>Per-provider scheduling state. <see cref="Updating"/> is 0 when
+    /// idle and 1 while an update task is launched/running; it is set before the
+    /// task starts and cleared in the task's <c>finally</c>, so it doubles as the
+    /// drain signal <see cref="Remove"/> waits on.</summary>
+    private sealed class ProviderState
+    {
+        public int Updating;
+    }
 
     public MetricPoller(IEnumerable<IMetricProvider> providers, TimeSpan interval)
     {
@@ -45,11 +61,10 @@ public sealed class MetricPoller : IDisposable
 
     public void Start()
     {
-        // Do NOT prime synchronously on the calling (UI) thread — providers
-        // resolve devices (DXGI / DriveInfo / NIC) inside Update, which can
-        // block on slow hardware. Kick the first tick to a pool thread and let
-        // the timer drive the rest. The first frame simply has no data yet.
-        _ = System.Threading.Tasks.Task.Run(() => Tick());
+        // Single source of ticks: the timer only. Each provider update already runs
+        // on its own pool task (see Tick), so an immediate first tick never blocks
+        // the UI thread — the old Task.Run(Tick) + TimeSpan.Zero combination
+        // double-fired the first tick and raced every provider's first Update.
         _timer.Change(TimeSpan.Zero, _interval);
     }
 
@@ -65,17 +80,34 @@ public sealed class MetricPoller : IDisposable
         }
     }
 
-    /// <summary>Unregisters a provider and drops its last snapshot. Safe to call
-    /// even if the provider was never registered. Serializes on
-    /// <see cref="_lock"/> so the caller can Dispose the provider immediately
-    /// after this returns without racing an in-flight Tick.</summary>
+    /// <summary>Unregisters a provider, drops its last snapshot, and drains any
+    /// in-flight update before returning. Safe to call even if the provider was
+    /// never registered. After this returns the caller may Dispose the provider
+    /// without racing an in-flight Update. The drain is bounded so a hung provider
+    /// can't freeze the UI thread on the rebind path.</summary>
     public void Remove(IMetricProvider provider)
     {
         if (provider == null) return;
+        ProviderState? st = null;
         lock (_lock)
         {
             _providers.TryRemove(provider, out _);
             _latest.TryRemove(provider, out _);
+            _states.TryGetValue(provider, out st);
+        }
+
+        // Wait (bounded) for the provider's update task to finish. The Updating
+        // flag is set before the task launches and cleared in its finally, so it
+        // covers tasks launched just before removal. Fast providers return almost
+        // instantly; the bound prevents a stuck provider from blocking the UI.
+        if (st != null)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (System.Threading.Interlocked.CompareExchange(ref st.Updating, 0, 0) != 0
+                   && sw.ElapsedMilliseconds < 3000)
+            {
+                System.Threading.Thread.Sleep(5);
+            }
         }
     }
 
@@ -83,38 +115,59 @@ public sealed class MetricPoller : IDisposable
     {
         if (_cts.IsCancellationRequested) return;
 
-        // Snapshot the provider set under the lock, then run the (potentially
-        // blocking) Update/GetMetrics calls OUTSIDE the lock so a slow provider
-        // can't stall a UI-thread Add/Remove. The snapshot is taken under the
-        // lock, so a provider removed via Remove (also under the lock) will not
-        // be present in this tick's iteration — keeping Remove-then-Dispose
-        // race-free.
+        // Snapshot the provider set under the lock, then launch each provider's
+        // update on its own task. A provider removed via Remove (under the lock)
+        // is not present in this snapshot.
         List<IMetricProvider> snapshot;
         lock (_lock)
         {
             snapshot = _providers.Keys.ToList();
         }
+        LastUpdate = DateTimeOffset.UtcNow;
 
-        var now = DateTimeOffset.UtcNow;
         foreach (var p in snapshot)
         {
-            try
+            var state = _states.GetOrAdd(p, _ => new ProviderState());
+
+            // Skip if this provider's previous update is still running — it runs
+            // at its own pace and never blocks the others.
+            if (System.Threading.Interlocked.CompareExchange(ref state.Updating, 1, 0) != 0)
+                continue;
+
+            // Re-check registration under the lock so a provider removed between
+            // the snapshot and now is not launched (Remove drains via Updating).
+            lock (_lock)
             {
-                p.Update(_interval);
-                var metrics = p.GetMetrics().ToArray();
-                // Write the completed snapshot back under the lock.
-                lock (_lock)
+                if (!_providers.ContainsKey(p))
                 {
-                    _latest[p] = metrics;
+                    System.Threading.Interlocked.Exchange(ref state.Updating, 0);
+                    continue;
                 }
             }
-            catch (Exception ex)
+
+            _ = System.Threading.Tasks.Task.Run(() =>
             {
-                // Fault isolation: log and keep the last good snapshot.
-                Console.Error.WriteLine($"[MetricPoller] provider {p.GetType().Name} failed: {ex.Message}");
-            }
+                try
+                {
+                    p.Update(_interval);
+                    var metrics = p.GetMetrics().ToArray();
+                    // Write the completed snapshot back under the lock.
+                    lock (_lock)
+                    {
+                        _latest[p] = metrics;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Fault isolation: log and keep the last good snapshot.
+                    Console.Error.WriteLine($"[MetricPoller] provider {p.GetType().Name} failed: {ex.Message}");
+                }
+                finally
+                {
+                    System.Threading.Interlocked.Exchange(ref state.Updating, 0);
+                }
+            });
         }
-        LastUpdate = now;
     }
 
     public DateTimeOffset LastUpdate { get; private set; }
@@ -131,8 +184,7 @@ public sealed class MetricPoller : IDisposable
         _cts.Cancel();
         _timer.Change(Timeout.Infinite, Timeout.Infinite);
         // Take the lock after cancelling so a Tick that is about to start (or is
-        // mid-flight) finishes before we tear down the timer — no Tick can run
-        // against a disposed provider during shutdown.
+        // mid-flight) finishes before we tear down the timer.
         lock (_lock)
         {
             _timer.Dispose();

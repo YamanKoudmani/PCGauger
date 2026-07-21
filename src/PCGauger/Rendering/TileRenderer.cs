@@ -182,6 +182,47 @@ public sealed partial class TileRenderer
         v.Finish(canvas, this);
     }
 
+    // ---- big-value typography (responsive) ----
+    // The headline number is the tile's visual anchor, but a fixed 46px overflows
+    // narrow tiles (long NET rate strings) and overwhelms short ones. Scale it
+    // down when it would overflow the content width or dominate a short tile,
+    // with a hard floor so it always stays prominent.
+    private const float BigValueMaxFont = 46f;
+    private const float BigValueMinFont = 26f;
+    // Baseline offset and vertical advance, as fractions of the font size (kept
+    // proportional to the original 46px / +40 baseline / +56 advance).
+    private const float BigValueBaselineRatio = 40f / 46f;
+    private const float BigValueAdvanceRatio = 56f / 46f;
+
+    /// <summary>Computes the big-value font size for a tile, scaled down from
+    /// <see cref="BigValueMaxFont"/> to fit the content width (value + suffix) and
+    /// the tile height, clamped to <see cref="BigValueMinFont"/>.</summary>
+    private float BigValueFontSize(SKCanvas canvas, TileVisual v, string text, string? suffix)
+    {
+        float availW = v.Rect.Width - 2 * TilePad;
+        float size = BigValueMaxFont;
+
+        // Width constraint: value + suffix (+gap) must fit the content width.
+        using (var probe = new SKFont(SKTypeface.FromFamilyName("Segoe UI Light"), size))
+        {
+            float textW = probe.MeasureText(text);
+            float suffixW = 0;
+            if (!string.IsNullOrEmpty(suffix))
+            {
+                using var sfx = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semilight"), size * (20f / BigValueMaxFont));
+                suffixW = sfx.MeasureText(suffix) + 6;
+            }
+            float totalW = textW + suffixW;
+            if (totalW > availW && totalW > 0)
+                size = Math.Min(size, size * (availW / totalW));
+        }
+
+        // Height constraint: keep the headline from overwhelming a short tile.
+        size = Math.Min(size, v.Rect.Height * 0.30f);
+
+        return Math.Clamp(size, BigValueMinFont, BigValueMaxFont);
+    }
+
     /// <summary>
     /// Draws a pre-formatted big value (used by NET, whose rate is a byte string
     /// rather than a bare percentage). Mirrors <see cref="DrawBigValue"/>'s
@@ -191,10 +232,12 @@ public sealed partial class TileRenderer
     {
         if (!v.Settings.ShowBigValue) return;
         float x = v.Rect.Left + TilePad;
+        float size = BigValueFontSize(canvas, v, literal, null);
+        float baseline = v.Y + size * BigValueBaselineRatio;
         using var paint = new SKPaint { Color = v.ValueColor, IsAntialias = true };
-        using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Light"), 46);
-        canvas.DrawText(literal, x, v.Y + 40, font, paint);
-        v.Y += 56;
+        using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Light"), size);
+        canvas.DrawText(literal, x, baseline, font, paint);
+        v.Y += size * BigValueAdvanceRatio;
     }
 
     /// <summary>Truncates text with an ellipsis so it never overflows maxWidth.</summary>
@@ -208,6 +251,43 @@ public sealed partial class TileRenderer
         while (sb.Length > 1 && f.MeasureText(sb.ToString() + ell) > maxWidth)
             sb.Remove(sb.Length - 1, 1);
         return sb.ToString() + ell;
+    }
+
+    /// <summary>
+    /// Draws text clipped to <paramref name="maxX"/>; when it's too wide it
+    /// dissolves into <paramref name="fadeInto"/> over the last few px (matching
+    /// the footer status-bar fade) instead of hard-clipping or overflowing the
+    /// card. Used for tile text that must never spill past the card's right edge.
+    /// </summary>
+    internal void DrawTextFaded(SKCanvas canvas, string text, float x, float baseline, float maxX, SKFont font, SKPaint paint, SKColor fadeInto)
+    {
+        const float FadeWidth = 28f;
+        if (string.IsNullOrEmpty(text)) return;
+        float avail = maxX - x;
+        if (avail <= 0) return;
+        if (font.MeasureText(text) <= avail)
+        {
+            canvas.DrawText(text, x, baseline, font, paint);
+            return;
+        }
+
+        // Clip so glyphs can't spill past the boundary, draw them, then dissolve
+        // the tail into the tile background.
+        var clip = new SKRect(x, baseline - font.Size * 1.4f, maxX, baseline + font.Size * 0.45f);
+        canvas.Save();
+        canvas.ClipRect(clip);
+        canvas.DrawText(text, x, baseline, font, paint);
+        canvas.Restore();
+
+        float fadeStart = maxX - FadeWidth;
+        using var fade = new SKPaint();
+        fade.Shader = SKShader.CreateLinearGradient(
+            new SKPoint(fadeStart, 0),
+            new SKPoint(maxX, 0),
+            new[] { fadeInto.WithAlpha(0), fadeInto.WithAlpha(255) },
+            new[] { 0f, 1f },
+            SKShaderTileMode.Clamp);
+        canvas.DrawRect(fadeStart, clip.Top, FadeWidth, clip.Height, fade);
     }
 
     // ---- card + primitives ----
@@ -451,50 +531,47 @@ public sealed partial class TileRenderer
     {
         if (!v.Settings.ShowTitle) return;
         float x = v.Rect.Left + TilePad;
+        // Keep title + subtitle clear of the top-right gear + grab-handle
+        // affordances. GearRect.Left = tile.Right - AffordanceInset -
+        // AffordanceSize - 6 - AffordanceSize (i.e. Right - 68); reserve that zone
+        // plus a small gap from the right edge.
+        float affordanceReserve = AffordanceInset + AffordanceSize + 6 + AffordanceSize + 6;
+        float maxX = v.Rect.Right - affordanceReserve;
+        float baseline = v.Y + 14;
         using var paint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
         using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 15);
-        canvas.DrawText(text, x, v.Y + 14, font, paint);
 
-        // Multi-instance header subtitle (e.g. "DISK" / "Backup (D:)"): a small
-        // dimmed second line under the kind title. Only drawn when there's room
-        // (the title row reserves 30px; we add ~16px for the subtitle when present
-        // and the tile is tall enough to avoid colliding with the grab/gear corner).
-        if (!string.IsNullOrEmpty(subtitle) && v.Rect.Height >= 96)
+        // The kind title and its device subtitle share ONE title row, so a
+        // subtitle never pushes the bar/graph/details down — every tile advances
+        // the same 30px and stays aligned. A long subtitle fade-truncates into
+        // the card instead of overflowing.
+        DrawTextFaded(canvas, text, x, baseline, maxX, font, paint, _theme.TileBackground);
+        if (!string.IsNullOrEmpty(subtitle))
         {
+            x += font.MeasureText(text) + 8;
             using var subPaint = new SKPaint { Color = _theme.TextSecondary.WithAlpha(150), IsAntialias = true };
-            using var subFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 11);
-            // Keep the subtitle clear of the top-right gear + grab-handle
-            // affordances. GearRect.Left = tile.Right - AffordanceInset -
-            // AffordanceSize - 6 - AffordanceSize (i.e. Right - 68), so reserve
-            // that whole zone plus a small gap from the right edge. (The title
-            // itself is left untouched — kind titles are short.)
-            float affordanceReserve = AffordanceInset + AffordanceSize + 6 + AffordanceSize + 6;
-            float subMaxWidth = v.Rect.Width - TilePad - affordanceReserve;
-            if (subMaxWidth < 40) subMaxWidth = 40; // never truncate to nothing on tiny tiles
-            string sub = Truncate(canvas, subtitle!, subMaxWidth, "Segoe UI", 11);
-            canvas.DrawText(sub, x, v.Y + 30, subFont, subPaint);
-            v.Y += 46;
+            using var subFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 12);
+            DrawTextFaded(canvas, subtitle!, x, baseline, maxX, subFont, subPaint, _theme.TileBackground);
         }
-        else
-        {
-            v.Y += 30;
-        }
+        v.Y += 30; // constant, with or without a subtitle
     }
 
     private void DrawBigValue(SKCanvas canvas, TileVisual v, double value, string suffix)
     {
         if (!v.Settings.ShowBigValue) return;
         float x = v.Rect.Left + TilePad;
-        using var paint = new SKPaint { Color = v.ValueColor, IsAntialias = true };
-        using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Light"), 46);
         string valStr = Format.Value(value);
-        canvas.DrawText(valStr, x, v.Y + 40, font, paint);
+        float size = BigValueFontSize(canvas, v, valStr, suffix);
+        float baseline = v.Y + size * BigValueBaselineRatio;
+        using var paint = new SKPaint { Color = v.ValueColor, IsAntialias = true };
+        using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Light"), size);
+        canvas.DrawText(valStr, x, baseline, font, paint);
 
         using var suffixPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var suffixFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semilight"), 20);
+        using var suffixFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semilight"), size * (20f / BigValueMaxFont));
         float valueWidth = font.MeasureText(valStr);
-        canvas.DrawText(suffix, x + valueWidth + 6, v.Y + 40, suffixFont, suffixPaint);
-        v.Y += 56;
+        canvas.DrawText(suffix, x + valueWidth + 6, baseline, suffixFont, suffixPaint);
+        v.Y += size * BigValueAdvanceRatio;
     }
 
     private void DrawBar(SKCanvas canvas, TileVisual v, double fraction)
@@ -1478,29 +1555,55 @@ public sealed class TileVisual
     {
         float pad = TileRenderer.TilePad;
         float bottom = Rect.Bottom - pad;
-        float top = Y + 4;
+        float maxX = Rect.Right - pad;
+
+        // Spacing tokens (tile body). The details line sits in the content flow —
+        // clear of the bar above and the graph below — and the graph fills ONLY
+        // the space genuinely remaining beneath it. Both degrade gracefully as the
+        // tile shortens: the graph drops out first (below GraphFloor), then the
+        // details line hides when it can no longer fit vertically — each returns
+        // once the tile is large enough again. Long text fade-truncates into the
+        // card rather than overflowing.
+        const float DetailsFontSize = 14f;
+        const float DetailsLineH = 18f;     // vertical allowance for the details row
+        const float GapAboveDetails = 6f;   // bar -> details text
+        const float GapBelowDetails = 6f;   // details text -> graph
+        const float GraphFloor = 40f;       // hide the graph below this height
+
+        float availAfterBar = bottom - Y;
 
         if (HasSparkline)
         {
-            // Fill ALL remaining vertical space. MinSparklineHeight is a FLOOR
-            // only: if the available space is smaller, the graph is still 90px
-            // tall and may overlap content upward (preserving the guard rail).
-            float available = bottom - top;
-            float sparkTop = bottom - Math.Max(available, TileRenderer.MinSparklineHeight);
-            var r = new SKRect(Rect.Left + pad, sparkTop, Rect.Right - pad, bottom);
-            if (SecondaryText != null)
+            // Details only if it fits vertically; graph only if enough room remains
+            // beneath it. Details outlives the graph on a shrinking tile.
+            bool showDetails = SecondaryText != null && availAfterBar >= GapAboveDetails + DetailsLineH;
+            float graphTop;
+            if (showDetails)
             {
-                using var p = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-                using var f = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 14);
-                canvas.DrawText(SecondaryText, Rect.Left + pad, sparkTop - 4, f, p);
+                // Baseline = content bottom (Y) + gap + font ascent (~font size).
+                float detailsBaseline = Y + GapAboveDetails + DetailsFontSize;
+                using (var p = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true })
+                using (var f = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), DetailsFontSize))
+                    renderer.DrawTextFaded(canvas, SecondaryText!, Rect.Left + pad, detailsBaseline, maxX, f, p, _theme.TileBackground);
+                graphTop = Y + GapAboveDetails + DetailsLineH + GapBelowDetails;
             }
-            renderer.DrawSparklinePath(canvas, r, this);
+            else
+            {
+                graphTop = Y + GapAboveDetails;
+            }
+
+            if (bottom - graphTop >= GraphFloor)
+            {
+                var r = new SKRect(Rect.Left + pad, graphTop, Rect.Right - pad, bottom);
+                renderer.DrawSparklinePath(canvas, r, this);
+            }
         }
-        else if (SecondaryText != null)
+        else if (SecondaryText != null && availAfterBar >= DetailsLineH)
         {
+            // No graph: details pinned to the bottom only when it fits vertically.
             using var p = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-            using var f = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 14);
-            canvas.DrawText(SecondaryText, Rect.Left + pad, bottom, f, p);
+            using var f = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), DetailsFontSize);
+            renderer.DrawTextFaded(canvas, SecondaryText, Rect.Left + pad, bottom, maxX, f, p, _theme.TileBackground);
         }
     }
 }

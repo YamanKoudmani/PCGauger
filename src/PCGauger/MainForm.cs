@@ -1579,12 +1579,20 @@ public sealed class MainForm : Form
         // The value is truncated with an ellipsis if it would reach the boundary.
         void Segment(string label, string value, SKColor color)
         {
-            canvas.DrawText(label, x, cy, labelFont, labelPaint);
-            x += labelFont.MeasureText(label);
-
+            // Never draw past maxRight: skip the whole segment when there isn't
+            // room for its label. A hard-clipped or button-overlapping label is
+            // worse than an omitted one on a very narrow / portrait window.
             float avail = maxRight - x;
+            float labelW = labelFont.MeasureText(label);
+            if (avail <= 0 || labelW >= avail) return;
+
+            canvas.DrawText(label, x, cy, labelFont, labelPaint);
+            x += labelW;
+
+            avail = maxRight - x;
+            if (avail <= 0) return;
             string drawn = value;
-            if (valueFont.MeasureText(value) > avail && avail > 0)
+            if (valueFont.MeasureText(value) > avail)
             {
                 // Trim char-by-char and append an ellipsis so long process
                 // names fade out gracefully instead of running under the buttons.
@@ -1592,20 +1600,21 @@ public sealed class MainForm : Form
                     drawn = drawn.Substring(0, drawn.Length - 1);
                 drawn += "…";
             }
-            else if (avail <= 0)
-            {
-                return; // no room left at all — skip this segment
-            }
 
             using var cp = new SKPaint { Color = color, IsAntialias = true };
             canvas.DrawText(drawn, x, cy, valueFont, cp);
             x += valueFont.MeasureText(drawn) + gap;
         }
 
+        // Safety net: clip the status text to the region left of the gear so a
+        // segment can never reach the buttons even on an extreme portrait window.
+        canvas.Save();
+        canvas.ClipRect(new SKRect(0, bandTop, maxRight, bandTop + FooterHeight));
         Segment("CPU Top: ", $"{cpuName} {Format.Percent(cpuPct)}", AccentOf(TileKind.Cpu));
         Segment("RAM Top: ", $"{ramName} {Format.Size(ramBytes, TileUnitMode.Auto, TileKind.Ram)}", AccentOf(TileKind.Ram));
-        Segment("GPU Top: ", $"{gpuName} {Format.Percent(gpuPct)}", AccentOf(TileKind.Gpu));
+        Segment("GPU Top: ", $"{gpuName} {Format.Percent(cpuPct)}", AccentOf(TileKind.Gpu));
         Segment("Disk Top: ", $"{diskName} {Format.Rate((ulong)diskBps, TileUnitMode.Auto, TileKind.Disk)}", AccentOf(TileKind.Disk));
+        canvas.Restore();
 
         // Smooth fade: dissolve any text approaching the boundary into the band
         // color so it never hard-clips against the gear/close buttons.

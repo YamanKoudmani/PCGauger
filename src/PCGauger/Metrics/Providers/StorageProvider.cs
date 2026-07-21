@@ -35,6 +35,7 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
     private IntPtr _readCounter;
     private IntPtr _writeCounter;
     private bool _countersOpened;
+    private int _consecutiveFailures;
 
     private ulong _totalBytes;
     private ulong _freeBytes;
@@ -107,6 +108,7 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
                 return di.IsReady;
             });
             DeviceAvailable = task.Wait(ProbeTimeoutMs) && task.Result;
+            if (DeviceAvailable) _consecutiveFailures = 0;
         }
         catch
         {
@@ -178,8 +180,9 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
         // Disposed guard: never touch native handles after CloseCounters.
         if (Interlocked.CompareExchange(ref _disposed, 0, 0) != 0) return;
 
-        // Capacity/free from DriveInfo. If the drive vanished, report zeros and
-        // mark unavailable; counters are torn down so they reopen on return.
+        // Capacity/free from DriveInfo. If the drive vanishes transiently, keep
+        // last-good values and skip PDH reads — only close counters and mark
+        // unavailable after 3 consecutive failures.
         try
         {
             var di = new DriveInfo(_drive);
@@ -187,8 +190,30 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
             {
                 _totalBytes = (ulong)di.TotalSize;
                 _freeBytes = (ulong)di.AvailableFreeSpace;
+                _consecutiveFailures = 0;
             }
             else
+            {
+                _consecutiveFailures++;
+                if (_consecutiveFailures >= 3)
+                {
+                    DeviceAvailable = false;
+                    _totalBytes = 0;
+                    _freeBytes = 0;
+                    _loadPct = 0;
+                    _readBytesPerSec = 0;
+                    _writeBytesPerSec = 0;
+                    CloseCounters();
+                    return;
+                }
+                // Transient glitch: keep last-good values, skip PDH read.
+                return;
+            }
+        }
+        catch
+        {
+            _consecutiveFailures++;
+            if (_consecutiveFailures >= 3)
             {
                 DeviceAvailable = false;
                 _totalBytes = 0;
@@ -199,16 +224,7 @@ public sealed class StorageProvider : IMetricProvider, IAsyncResolvable
                 CloseCounters();
                 return;
             }
-        }
-        catch
-        {
-            DeviceAvailable = false;
-            _totalBytes = 0;
-            _freeBytes = 0;
-            _loadPct = 0;
-            _readBytesPerSec = 0;
-            _writeBytesPerSec = 0;
-            CloseCounters();
+            // Transient error: keep last-good values, skip PDH read.
             return;
         }
 

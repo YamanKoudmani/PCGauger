@@ -394,12 +394,16 @@ public sealed class MainForm : Form
         {
             case GpuProvider gpu:
                 tile.DeviceAvailable = gpu.DeviceAvailable;
+                if (!string.IsNullOrEmpty(gpu.AdapterName))
+                    tile.DeviceDisplayName = gpu.AdapterName;
                 break;
             case StorageProvider disk:
                 tile.DeviceAvailable = disk.DeviceAvailable;
                 break;
             case NetworkProvider net:
                 tile.DeviceAvailable = net.DeviceAvailable;
+                if (net.InterfaceName is { Length: > 0 } and not "-")
+                    tile.DeviceDisplayName = net.InterfaceName;
                 break;
         }
     }

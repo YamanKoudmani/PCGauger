@@ -8,7 +8,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>PCGauger</AssemblyName>
     <RootNamespace>PCGauger</RootNamespace>
-    <Version>2.1.0</Version>
+    <Version>2.1.1</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <InvariantGlobalization>true</InvariantGlobalization>

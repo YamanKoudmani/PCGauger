@@ -25,9 +25,14 @@ public sealed class Theme
     /// <summary>Settings-pane card background (slightly raised over the tile bg).</summary>
     public SKColor PaneBackground { get; }
 
-    public SKPaint BackgroundPaint() => new SKPaint { Color = Background, Style = SKPaintStyle.Fill };
-    public SKPaint TilePaint() => new SKPaint { Color = TileBackground, Style = SKPaintStyle.Fill, IsAntialias = true };
-    public SKPaint TileBorderPaint() => new SKPaint { Color = TileBorder, Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
+    // Cached paints: theme colors are immutable, so these are created once and
+    // reused every frame. Callers must NOT dispose them (shared with all tiles).
+    private SKPaint? _backgroundPaint;
+    private SKPaint? _tilePaint;
+    private SKPaint? _tileBorderPaint;
+    public SKPaint BackgroundPaint() => _backgroundPaint ??= new SKPaint { Color = Background, Style = SKPaintStyle.Fill };
+    public SKPaint TilePaint() => _tilePaint ??= new SKPaint { Color = TileBackground, Style = SKPaintStyle.Fill, IsAntialias = true };
+    public SKPaint TileBorderPaint() => _tileBorderPaint ??= new SKPaint { Color = TileBorder, Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
 
     private Theme(string name, SKColor bg, SKColor tileBg, SKColor tileBorder, SKColor textPrimary,
         SKColor textSecondary, SKColor accent, SKColor accentSoft, SKColor sparkline, SKColor footerBand, SKColor paneBg)

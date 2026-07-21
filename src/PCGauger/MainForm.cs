@@ -44,6 +44,7 @@ public sealed class MainForm : Form
         public RollingHistory HistA = null!;     // primary series (usage / read / down)
         public RollingHistory? HistB;            // secondary series (write / up); null for single-series kinds
         public IDeviceCatalog? Catalog;          // non-null for multi-instance kinds
+        public DateTimeOffset LastPushedTick;    // last poller tick sampled into the histories
     }
 
     private readonly List<TileRuntime> _runtimes = new();
@@ -309,24 +310,40 @@ public sealed class MainForm : Form
     }
 
     // ---- Tile draw callbacks (bound to current snapshots) ----
+    //
+    // History sampling is gated on the poller tick: the metric snapshots only
+    // change at 1 Hz, so pushing once per paint frame (~30/s) would store ~30
+    // identical values per real sample — bloating the ring buffers and forcing
+    // every sparkline through a ~1024-point decimation + spline build per frame.
+    // Pushing once per tick keeps the graph shape identical (X is time-mapped)
+    // while cutting points/frame ~17x and history allocations ~25-100x.
+    private static void SampleHistory(TileRuntime rt, MetricPoller poller, double a, double? b = null)
+    {
+        if (poller.LastUpdate == rt.LastPushedTick) return;
+        rt.LastPushedTick = poller.LastUpdate;
+        rt.HistA.Push(a);
+        if (b.HasValue) rt.HistB!.Push(b.Value);
+    }
+
     private void DrawCpu(SKCanvas c, SKRect r, Tile tile)
     {
         var rt = _runtimeByKey[tile.ConfigKey];
         var snap = _poller.GetSnapshot(rt.Provider);
         double usage = MetricValue(snap, "cpu.aggregate");
-        rt.HistA.Push(usage);
+        SampleHistory(rt, _poller, usage);
         _renderer.DrawCpuTile(c, r, tile.Settings, TilePalette.Resolve(tile.Kind, tile.Settings),
-            usage, _cpu.CurrentMhz, _cpu.PhysicalCores, _cpu.LogicalProcessors, rt.HistA.DecimatedSnapshot(1024), rt.HistA.Window);
+            usage, _cpu.CurrentMhz, _cpu.PhysicalCores, _cpu.LogicalProcessors, rt.HistA.DecimatedSnapshot(256), rt.HistA.Window,
+            axisKey: tile.ConfigKey);
     }
     private void DrawRam(SKCanvas c, SKRect r, Tile tile)
     {
         var rt = _runtimeByKey[tile.ConfigKey];
         var snap = _memPoller.GetSnapshot(rt.Provider);
         double load = MetricValue(snap, "mem.load");
-        rt.HistA.Push(load);
-        _renderer.SetRamHistory(rt.HistA.DecimatedSnapshot(1024), rt.HistA.Window);
+        SampleHistory(rt, _memPoller, load);
+        _renderer.SetRamHistory(rt.HistA.DecimatedSnapshot(256), rt.HistA.Window);
         _renderer.DrawRamTile(c, r, tile.Settings, TilePalette.Resolve(tile.Kind, tile.Settings),
-            load, _mem.UsedPhys, _mem.TotalPhys);
+            load, _mem.UsedPhys, _mem.TotalPhys, axisKey: tile.ConfigKey);
     }
     private void DrawGpu(SKCanvas c, SKRect r, Tile tile)
     {
@@ -339,11 +356,11 @@ public sealed class MainForm : Form
         }
         var snap = _poller.GetSnapshot(rt.Provider);
         double util = MetricValue(snap, "gpu.util");
-        rt.HistA.Push(util);
-        _renderer.SetGpuHistory(rt.HistA.DecimatedSnapshot(1024), rt.HistA.Window);
+        SampleHistory(rt, _poller, util);
+        _renderer.SetGpuHistory(rt.HistA.DecimatedSnapshot(256), rt.HistA.Window);
         _renderer.DrawGpuTile(c, r, tile.Settings, TilePalette.Resolve(tile.Kind, tile.Settings),
             util, ((GpuProvider)rt.Provider).VramUsed, ((GpuProvider)rt.Provider).VramBudget,
-            deviceSubtitle: tile.IsDeviceSelectable ? tile.DeviceDisplayName : null);
+            deviceSubtitle: tile.IsDeviceSelectable ? tile.DeviceDisplayName : null, axisKey: tile.ConfigKey);
     }
     private void DrawDisk(SKCanvas c, SKRect r, Tile tile)
     {
@@ -357,12 +374,11 @@ public sealed class MainForm : Form
         var snap = _poller.GetSnapshot(rt.Provider);
         double pct = MetricValue(snap, "disk.load");
         var disk = (StorageProvider)rt.Provider;
-        rt.HistA.Push(disk.ReadBytesPerSec);
-        rt.HistB!.Push(disk.WriteBytesPerSec);
-        _renderer.SetDiskHistory(rt.HistA.DecimatedSnapshot(1024), rt.HistB.DecimatedSnapshot(1024), rt.HistA.Window);
+        SampleHistory(rt, _poller, disk.ReadBytesPerSec, disk.WriteBytesPerSec);
+        _renderer.SetDiskHistory(rt.HistA.DecimatedSnapshot(256), rt.HistB!.DecimatedSnapshot(256), rt.HistA.Window);
         _renderer.DrawDiskTile(c, r, tile.Settings, TilePalette.Resolve(tile.Kind, tile.Settings),
             pct, disk.TotalBytes - disk.FreeBytes, disk.TotalBytes, disk.BytesPerSec,
-            deviceSubtitle: tile.IsDeviceSelectable ? tile.DeviceDisplayName : null);
+            deviceSubtitle: tile.IsDeviceSelectable ? tile.DeviceDisplayName : null, axisKey: tile.ConfigKey);
     }
     private void DrawNet(SKCanvas c, SKRect r, Tile tile)
     {
@@ -378,12 +394,11 @@ public sealed class MainForm : Form
         double up = MetricValue(snap, "net.up");
         string iface = TextValue(snap, "net.name");
         var net = (NetworkProvider)rt.Provider;
-        rt.HistA.Push(down);
-        rt.HistB!.Push(up);
-        _renderer.SetNetHistory(rt.HistA.DecimatedSnapshot(1024), rt.HistB.DecimatedSnapshot(1024), rt.HistA.Window);
+        SampleHistory(rt, _poller, down, up);
+        _renderer.SetNetHistory(rt.HistA.DecimatedSnapshot(256), rt.HistB!.DecimatedSnapshot(256), rt.HistA.Window);
         _renderer.DrawNetworkTile(c, r, tile.Settings, TilePalette.Resolve(tile.Kind, tile.Settings),
             down, up, iface,
-            deviceSubtitle: tile.IsDeviceSelectable ? tile.DeviceDisplayName : null);
+            deviceSubtitle: tile.IsDeviceSelectable ? tile.DeviceDisplayName : null, axisKey: tile.ConfigKey);
     }
 
     /// <summary>Mirrors the bound provider's availability + display name into the
@@ -421,14 +436,31 @@ public sealed class MainForm : Form
         return new SKRect(gap, gap, ClientSize.Width - gap, bottom);
     }
 
+    // Layout rects depend only on (client size, tile count) — tile REORDERS
+    // don't affect them (rects are positional by index). Cache them and rebuild
+    // only when one of those inputs changes, instead of allocating 3 fresh lists
+    // on every paint frame AND every WM_NCHITTEST / MouseMove message.
+    private int _layoutW = -1, _layoutH = -1, _layoutCount = -1;
+    private List<SKRect> _rectsCache = new();
+    private List<SKRect> _handlesCache = new();
+    private List<SKRect> _gearsCache = new();
+
     private List<SKRect> TileRects()
     {
-        float gap = 12;
-        return (List<SKRect>)GridLayout.Compute(GridArea(), _tiles.Count, gap);
+        int w = ClientSize.Width, h = ClientSize.Height, n = _tiles.Count;
+        if (w != _layoutW || h != _layoutH || n != _layoutCount)
+        {
+            _layoutW = w; _layoutH = h; _layoutCount = n;
+            const float gap = 12;
+            _rectsCache = (List<SKRect>)GridLayout.Compute(GridArea(), n, gap);
+            _handlesCache = _rectsCache.Select(TileRenderer.GrabHandleRect).ToList();
+            _gearsCache = _rectsCache.Select(TileRenderer.GearRect).ToList();
+        }
+        return _rectsCache;
     }
 
-    private List<SKRect> HandleRects() => TileRects().Select(TileRenderer.GrabHandleRect).ToList();
-    private List<SKRect> GearRects() => TileRects().Select(TileRenderer.GearRect).ToList();
+    private List<SKRect> HandleRects() { TileRects(); return _handlesCache; }
+    private List<SKRect> GearRects() { TileRects(); return _gearsCache; }
 
     /// <summary>The footer-gear hit rect: a 22px square in the status band, left of the close button.</summary>
     private SKRect FooterGearRect()
@@ -1484,10 +1516,10 @@ public sealed class MainForm : Form
         int w = e.Info.Width;
         int h = e.Info.Height;
 
-        using (var bg = _theme.BackgroundPaint())
-            canvas.DrawRect(0, 0, w, h, bg);
+        var bg = _theme.BackgroundPaint(); // cached — do NOT dispose
+        canvas.DrawRect(0, 0, w, h, bg);
 
-        var rects = GridLayout.Compute(GridArea(), _tiles.Count, 12);
+        var rects = TileRects();
         for (int i = 0; i < _tiles.Count; i++)
             _tiles[i].Draw(canvas, rects[i]);
         for (int i = 0; i < _tiles.Count; i++)
@@ -1538,6 +1570,19 @@ public sealed class MainForm : Form
         }
     }
 
+    // Footer segment text/layout cache. The top-process snapshot changes at
+    // ~1 Hz (the poller stores a fresh array each tick), so composing strings,
+    // measuring them, and fitting the truncated values is redone only when the
+    // snapshot reference or the available width changes — not every frame.
+    private sealed class FooterCache
+    {
+        public IReadOnlyList<Metric>? Snapshot;
+        public float MaxRight = -1;
+        public float TotalWidth;
+        public readonly List<(string Label, string Value, SKColor Color, float X, float LabelW, float ValueW)> Segments = new(4);
+    }
+    private readonly FooterCache _footerCache = new();
+
     private void DrawFooter(SKCanvas canvas, int w, int h)
     {
         float bandTop = h - FooterHeight;
@@ -1547,78 +1592,35 @@ public sealed class MainForm : Form
         canvas.DrawLine(0, bandTop, w, bandTop, sep);
 
         var topSnap = _poller.GetSnapshot(_top);
-        string cpuName = TextValue(topSnap, "proc.topcpu.name");
-        double cpuPct = MetricValue(topSnap, "proc.topcpu.pct");
-        string ramName = TextValue(topSnap, "proc.topram.name");
-        ulong ramBytes = (ulong)MetricValue(topSnap, "proc.topram.bytes");
-        string gpuName = TextValue(topSnap, "proc.topgpu.name");
-        double gpuPct = MetricValue(topSnap, "proc.topgpu.pct");
-        string diskName = TextValue(topSnap, "proc.topdisk.name");
-        double diskBps = MetricValue(topSnap, "proc.topdisk.bps");
-
-        using var labelPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var labelFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 14);
-        using var valueFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 14);
-        float cy = bandTop + FooterHeight / 2f + 4;
-        float x = 14;
-        float gap = 22;
 
         // Hard right boundary: leave a gap before the footer gear so the
         // Top text can never collide with the gear/close buttons.
         float maxRight = FooterGearRect().Left - 10;
         const float FadeWidth = 40; // px of smooth dissolve before the boundary
 
-        // Effective accent per kind (honors per-tile color overrides).
-        SKColor AccentOf(TileKind kind)
-        {
-            var tile = _allTiles.Find(t => t.Kind == kind);
-            return tile != null ? TilePalette.Resolve(kind, tile.Settings) : TilePalette.DefaultFor(kind);
-        }
+        if (!ReferenceEquals(_footerCache.Snapshot, topSnap) || _footerCache.MaxRight != maxRight)
+            RebuildFooterSegments(topSnap, maxRight);
 
-        // "CPU Top: chrome 12.5%" — muted label, bold measurement in the tile's color.
-        // The value is truncated with an ellipsis if it would reach the boundary.
-        void Segment(string label, string value, SKColor color)
-        {
-            // Never draw past maxRight: skip the whole segment when there isn't
-            // room for its label. A hard-clipped or button-overlapping label is
-            // worse than an omitted one on a very narrow / portrait window.
-            float avail = maxRight - x;
-            float labelW = labelFont.MeasureText(label);
-            if (avail <= 0 || labelW >= avail) return;
-
-            canvas.DrawText(label, x, cy, labelFont, labelPaint);
-            x += labelW;
-
-            avail = maxRight - x;
-            if (avail <= 0) return;
-            string drawn = value;
-            if (valueFont.MeasureText(value) > avail)
-            {
-                // Trim char-by-char and append an ellipsis so long process
-                // names fade out gracefully instead of running under the buttons.
-                while (drawn.Length > 1 && valueFont.MeasureText(drawn + "…") > avail)
-                    drawn = drawn.Substring(0, drawn.Length - 1);
-                drawn += "…";
-            }
-
-            using var cp = new SKPaint { Color = color, IsAntialias = true };
-            canvas.DrawText(drawn, x, cy, valueFont, cp);
-            x += valueFont.MeasureText(drawn) + gap;
-        }
+        var labelFont = TileRenderer.CachedFont("Segoe UI", 14);
+        var valueFont = TileRenderer.CachedFont("Segoe UI Semibold", 14);
+        using var labelPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
+        float cy = bandTop + FooterHeight / 2f + 4;
 
         // Safety net: clip the status text to the region left of the gear so a
         // segment can never reach the buttons even on an extreme portrait window.
         canvas.Save();
         canvas.ClipRect(new SKRect(0, bandTop, maxRight, bandTop + FooterHeight));
-        Segment("CPU Top: ", $"{cpuName} {Format.Percent(cpuPct)}", AccentOf(TileKind.Cpu));
-        Segment("RAM Top: ", $"{ramName} {Format.Size(ramBytes, TileUnitMode.Auto, TileKind.Ram)}", AccentOf(TileKind.Ram));
-        Segment("GPU Top: ", $"{gpuName} {Format.Percent(cpuPct)}", AccentOf(TileKind.Gpu));
-        Segment("Disk Top: ", $"{diskName} {Format.Rate((ulong)diskBps, TileUnitMode.Auto, TileKind.Disk)}", AccentOf(TileKind.Disk));
+        foreach (var seg in _footerCache.Segments)
+        {
+            canvas.DrawText(seg.Label, seg.X, cy, labelFont, labelPaint);
+            using var cp = new SKPaint { Color = seg.Color, IsAntialias = true };
+            canvas.DrawText(seg.Value, seg.X + seg.LabelW, cy, valueFont, cp);
+        }
         canvas.Restore();
 
         // Smooth fade: dissolve any text approaching the boundary into the band
         // color so it never hard-clips against the gear/close buttons.
-        if (x > maxRight - FadeWidth)
+        if (_footerCache.TotalWidth > maxRight - FadeWidth)
         {
             float fadeStart = Math.Max(maxRight - FadeWidth, 0);
             using var fade = new SKPaint();
@@ -1634,6 +1636,65 @@ public sealed class MainForm : Form
         // Footer gear at far right.
         _renderer.DrawGearAt(canvas, FooterGearRect(), _hoverFooterGear, _theme.Accent);
         _renderer.DrawCloseAt(canvas, FooterCloseRect(), _hoverFooterClose);
+    }
+
+    /// <summary>Recomposes + measures the footer segments (labels, fitted values,
+    /// accent colors, absolute X positions). Runs only when the top-process
+    /// snapshot or the right boundary changes (~1 Hz or on resize).</summary>
+    private void RebuildFooterSegments(IReadOnlyList<Metric> topSnap, float maxRight)
+    {
+        var c = _footerCache;
+        c.Segments.Clear();
+        c.Snapshot = topSnap;
+        c.MaxRight = maxRight;
+
+        string cpuName = TextValue(topSnap, "proc.topcpu.name");
+        double cpuPct = MetricValue(topSnap, "proc.topcpu.pct");
+        string ramName = TextValue(topSnap, "proc.topram.name");
+        ulong ramBytes = (ulong)MetricValue(topSnap, "proc.topram.bytes");
+        string gpuName = TextValue(topSnap, "proc.topgpu.name");
+        double gpuPct = MetricValue(topSnap, "proc.topgpu.pct");
+        string diskName = TextValue(topSnap, "proc.topdisk.name");
+        double diskBps = MetricValue(topSnap, "proc.topdisk.bps");
+
+        // Effective accent per kind (honors per-tile color overrides).
+        SKColor AccentOf(TileKind kind)
+        {
+            var tile = _allTiles.Find(t => t.Kind == kind);
+            return tile != null ? TilePalette.Resolve(kind, tile.Settings) : TilePalette.DefaultFor(kind);
+        }
+
+        var labelFont = TileRenderer.CachedFont("Segoe UI", 14);
+        var valueFont = TileRenderer.CachedFont("Segoe UI Semibold", 14);
+        float x = 14;
+        const float gap = 22;
+
+        // "CPU Top: chrome 12.5%" — muted label, bold measurement in the tile's
+        // color. Skip a segment entirely when there isn't room for its label
+        // (graceful degradation on narrow windows); fit the value with an
+        // ellipsis via binary search instead of re-measuring per dropped char.
+        void Segment(string label, string value, SKColor color)
+        {
+            float avail = maxRight - x;
+            float labelW = labelFont.MeasureText(label);
+            if (avail <= 0 || labelW >= avail) return;
+
+            avail -= labelW;
+            if (avail <= 0) return;
+            string drawn = TileRenderer.FitToWidth(valueFont, value, avail);
+            float valueW = valueFont.MeasureText(drawn);
+
+            c.Segments.Add((label, drawn, color, x, labelW, valueW));
+            x += labelW + valueW + gap;
+        }
+
+        Segment("CPU Top: ", $"{cpuName} {Format.Percent(cpuPct)}", AccentOf(TileKind.Cpu));
+        Segment("RAM Top: ", $"{ramName} {Format.Size(ramBytes, TileUnitMode.Auto, TileKind.Ram)}", AccentOf(TileKind.Ram));
+        // BUG FIX (was: cpuPct) — the GPU segment rendered the CPU percentage.
+        Segment("GPU Top: ", $"{gpuName} {Format.Percent(gpuPct)}", AccentOf(TileKind.Gpu));
+        Segment("Disk Top: ", $"{diskName} {Format.Rate((ulong)diskBps, TileUnitMode.Auto, TileKind.Disk)}", AccentOf(TileKind.Disk));
+
+        c.TotalWidth = x;
     }
 
     private static double MetricValue(IReadOnlyList<Metric> snap, string key)

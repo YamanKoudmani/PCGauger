@@ -259,7 +259,7 @@ public sealed partial class TileRenderer
         float y = pane.Top + PanePad;
 
         using var headerPaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        using var headerFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 13);
+        var headerFont = TileRenderer.CachedFont("Segoe UI Semibold", 13);
         canvas.DrawText("Customize", x, y + 12, headerFont, headerPaint);
         y += PaneHeaderGap;
 
@@ -278,7 +278,7 @@ public sealed partial class TileRenderer
 
         // Units segmented control.
         using var unitLabelPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var unitLabelFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 12);
+        var unitLabelFont = TileRenderer.CachedFont("Segoe UI", 12);
         canvas.DrawText("Units", x, y + 11, unitLabelFont, unitLabelPaint);
         string[] unitLabels = { "Auto", "Bits", "Bytes" };
         int unitIdx = (int)v.Settings.UnitMode;
@@ -290,7 +290,7 @@ public sealed partial class TileRenderer
         y += 10;
 
         using var subPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var subFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 12);
+        var subFont = TileRenderer.CachedFont("Segoe UI", 12);
         canvas.DrawText("Accent", x, y + 11, subFont, subPaint);
         y += PaneAccentLabelH;
 
@@ -332,7 +332,7 @@ public sealed partial class TileRenderer
         float tx = gx + GlyphSize + 8;
         string name = tile.DeviceDisplayName ?? "—";
         using var namePaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        using var nameFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 12);
+        var nameFont = TileRenderer.CachedFont("Segoe UI Semibold", 12);
         string shown = Truncate(canvas, name, row.Right - tx - 26, "Segoe UI Semibold", 12);
         canvas.DrawText(shown, tx, row.MidY + 4, nameFont, namePaint);
 
@@ -366,7 +366,7 @@ public sealed partial class TileRenderer
         float x = d.Left + 4;
         float right = d.Right - 4;
         using var hdr = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var hdrF = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 11);
+        var hdrF = TileRenderer.CachedFont("Segoe UI", 11);
         canvas.DrawText("Device", x, d.Top + 12, hdrF, hdr);
 
         int total = state.Items.Count;
@@ -412,14 +412,14 @@ public sealed partial class TileRenderer
         SKColor dim = item.Disabled ? _theme.TextSecondary.WithAlpha(80) : _theme.TextSecondary;
 
         using var nameP = new SKPaint { Color = primary, IsAntialias = true };
-        using var nameF = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 12);
+        var nameF = TileRenderer.CachedFont("Segoe UI Semibold", 12);
         string shown = Truncate(canvas, item.DisplayName, right - x - 22, "Segoe UI Semibold", 12);
         canvas.DrawText(shown, x, r.MidY - 1, nameF, nameP);
 
         if (!string.IsNullOrEmpty(item.Detail))
         {
             using var detP = new SKPaint { Color = dim, IsAntialias = true };
-            using var detF = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 10);
+            var detF = TileRenderer.CachedFont("Segoe UI", 10);
             string det = Truncate(canvas, item.Detail, right - x - 22, "Segoe UI", 10);
             canvas.DrawText(det, x, r.MidY + 11, detF, detP);
         }
@@ -446,7 +446,7 @@ public sealed partial class TileRenderer
         canvas.DrawRoundRect(rr, b);
 
         using var tPaint = new SKPaint { Color = hover ? Danger : Danger.WithAlpha(210), IsAntialias = true };
-        using var tFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 12);
+        var tFont = TileRenderer.CachedFont("Segoe UI Semibold", 12);
         float tw = tFont.MeasureText("Remove tile");
         canvas.DrawText("Remove tile", r.MidX - tw / 2, r.MidY + 4, tFont, tPaint);
     }
@@ -484,7 +484,7 @@ public sealed partial class TileRenderer
             kind, Unavailable);
 
         using var head = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        using var headF = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 13);
+        var headF = TileRenderer.CachedFont("Segoe UI Semibold", 13);
         string headText = "Device unavailable";
         float hw = headF.MeasureText(headText);
         canvas.DrawText(headText, cx - hw / 2, cy + 16, headF, head);
@@ -492,7 +492,7 @@ public sealed partial class TileRenderer
         if (!string.IsNullOrEmpty(deviceName))
         {
             using var nameP = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-            using var nameF = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 11);
+            var nameF = TileRenderer.CachedFont("Segoe UI", 11);
             string nm = Truncate(canvas, deviceName, rect.Width - 2 * TilePad, "Segoe UI", 11);
             float nw = nameF.MeasureText(nm);
             canvas.DrawText(nm, cx - nw / 2, cy + 34, nameF, nameP);
@@ -730,7 +730,7 @@ public sealed partial class TileRenderer
         float rx = p.Right - pad;
 
         using var headerPaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        using var headerFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 15);
+        var headerFont = TileRenderer.CachedFont("Segoe UI Semibold", 15);
         canvas.DrawText("Settings", lx, p.Top + pad + 14, headerFont, headerPaint);
         DrawCloseGlyph(canvas, layout.Close, hoverClose);
 
@@ -770,7 +770,7 @@ public sealed partial class TileRenderer
 
         // ---- Tiles section header ----
         using var secPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var secFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 12);
+        var secFont = TileRenderer.CachedFont("Segoe UI Semibold", 12);
         float tilesHeaderY = layout.TileChips[0].Top - 4 - 13;
         canvas.DrawText("Tiles", lx, tilesHeaderY + 13, secFont, secPaint);
 
@@ -787,9 +787,14 @@ public sealed partial class TileRenderer
         }
 
         // Version label pinned to the bottom of the settings pane.
+        // Application.ProductVersion is the AssemblyInformationalVersion, which
+        // the SDK appends "+<commit-sha>" to — show just the version number.
         using var verPaint = new SKPaint { Color = _theme.TextSecondary.WithAlpha(160), IsAntialias = true };
-        using var verFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 11);
-        string verText = $"PCGauger v{Application.ProductVersion}";
+        var verFont = TileRenderer.CachedFont("Segoe UI", 11);
+        string ver = Application.ProductVersion;
+        int plus = ver.IndexOf('+');
+        if (plus > 0) ver = ver.Substring(0, plus);
+        string verText = $"PCGauger v{ver}";
         float verW = verFont.MeasureText(verText);
         canvas.DrawText(verText, p.Right - pad - verW, p.Bottom - pad - 4, verFont, verPaint);
 
@@ -808,7 +813,7 @@ public sealed partial class TileRenderer
             _ => kind.ToString(),
         };
         using var labelPaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        using var labelFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 13);
+        var labelFont = TileRenderer.CachedFont("Segoe UI Semibold", 13);
         string full = $"{label} · {count}";
         canvas.DrawText(full, row.Left, row.MidY + 5, labelFont, labelPaint);
 
@@ -820,7 +825,7 @@ public sealed partial class TileRenderer
         canvas.DrawRoundRect(rr, bp);
 
         using var tp = new SKPaint { Color = hoverBtn ? accent : _theme.TextSecondary, IsAntialias = true };
-        using var tf = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 12);
+        var tf = TileRenderer.CachedFont("Segoe UI Semibold", 12);
         float plus = 10;
         float gap = 4;
         const string addTxt = "Add";
@@ -860,14 +865,14 @@ public sealed partial class TileRenderer
             _ => "Add device",
         };
         using var hdr = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        using var hdrF = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 12);
+        var hdrF = TileRenderer.CachedFont("Segoe UI Semibold", 12);
         canvas.DrawText(kindLabel, d.Left + 8, d.Top + 14, hdrF, hdr);
         DrawCloseGlyph(canvas, layout.PickerClose, false);
 
         if (state.PickerItems.Count == 0)
         {
             using var empty = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-            using var emptyF = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 12);
+            var emptyF = TileRenderer.CachedFont("Segoe UI", 12);
             string msg = state.ActivePickerKind switch
             {
                 TileKind.Disk => "All disks added",

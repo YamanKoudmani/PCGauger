@@ -63,12 +63,69 @@ public sealed partial class TileRenderer
 
     public TileRenderer(Theme theme) => _theme = theme;
 
+    // ---- shared typeface/font cache ----
+    // SKTypeface.FromFamilyName performs a font-manager match on every call and
+    // both wrapper types are small native allocations — at 30 fps with ~15-30
+    // font uses per frame that is hundreds of throwaway objects per second.
+    // Fonts/typefaces are used read-only here (draw + measure), all rendering
+    // happens on the UI thread, and only ~4 families at a handful of fixed
+    // sizes are ever used, so plain app-lifetime dictionaries are safe.
+    // NEVER dispose objects returned from these helpers.
+    private static readonly Dictionary<string, SKTypeface> _typefaces = new(StringComparer.Ordinal);
+    private static readonly Dictionary<(string Family, float Size), SKFont> _fonts = new();
+
+    /// <summary>Returns a cached typeface for <paramref name="family"/> (the
+    /// expensive font-manager lookup happens once per family).</summary>
+    internal static SKTypeface TypefaceOf(string family)
+    {
+        if (!_typefaces.TryGetValue(family, out var tf) || tf == null)
+        {
+            tf = SKTypeface.FromFamilyName(family) ?? SKTypeface.Default;
+            _typefaces[family] = tf;
+        }
+        return tf;
+    }
+
+    /// <summary>Returns a cached, never-disposed font for a FIXED (family, size)
+    /// pair. Callers must NOT dispose the result. For dynamic sizes, construct
+    /// an <see cref="SKFont"/> from <see cref="TypefaceOf"/> and dispose it locally.</summary>
+    internal static SKFont CachedFont(string family, float size)
+    {
+        var key = (family, size);
+        if (!_fonts.TryGetValue(key, out var f))
+        {
+            f = new SKFont(TypefaceOf(family), size);
+            _fonts[key] = f;
+        }
+        return f;
+    }
+
+    /// <summary>Truncates <paramref name="text"/> with an ellipsis so the result
+    /// fits <paramref name="maxWidth"/>, via binary search (O(log n) measures)
+    /// instead of re-measuring the whole string per dropped character (O(n²)).
+    /// Same result as the old char-by-char trim: the longest fitting prefix,
+    /// at least one character, plus "…".</summary>
+    internal static string FitToWidth(SKFont font, string text, float maxWidth)
+    {
+        if (string.IsNullOrEmpty(text)) return text ?? "";
+        if (font.MeasureText(text) <= maxWidth) return text;
+
+        int lo = 0, hi = text.Length - 1; // prefix lengths to test
+        while (lo < hi)
+        {
+            int mid = (lo + hi + 1) / 2;
+            if (font.MeasureText(text.Substring(0, mid) + "…") <= maxWidth) lo = mid;
+            else hi = mid - 1;
+        }
+        return text.Substring(0, Math.Max(lo, 1)) + "…";
+    }
+
     // ---- tile entry points (settings + accent aware) ----
 
-    public void DrawCpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, uint clockMhz, int physicalCores, int logicalProcessors, IReadOnlyList<(DateTimeOffset, double)> history, TimeSpan historyWindow, string? deviceSubtitle = null)
+    public void DrawCpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, uint clockMhz, int physicalCores, int logicalProcessors, IReadOnlyList<(DateTimeOffset, double)> history, TimeSpan historyWindow, string? deviceSubtitle = null, string? axisKey = null)
     {
         bool alert = ThresholdEnabled && usagePct >= ThresholdPercent;
-        var v = new TileVisual(TileKind.Cpu, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = historyWindow.TotalSeconds };
+        var v = new TileVisual(TileKind.Cpu, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = historyWindow.TotalSeconds, AxisKey = axisKey ?? nameof(TileKind.Cpu) };
         DrawCard(canvas, rect);
         DrawTitle(canvas, v, "CPU", deviceSubtitle);
         DrawBigValue(canvas, v, usagePct, "%");
@@ -78,10 +135,10 @@ public sealed partial class TileRenderer
         v.Finish(canvas, this);
     }
 
-    public void DrawRamTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, ulong used, ulong total, string? deviceSubtitle = null)
+    public void DrawRamTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, ulong used, ulong total, string? deviceSubtitle = null, string? axisKey = null)
     {
         bool alert = ThresholdEnabled && usagePct >= ThresholdPercent;
-        var v = new TileVisual(TileKind.Ram, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _ramWindowSeconds };
+        var v = new TileVisual(TileKind.Ram, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _ramWindowSeconds, AxisKey = axisKey ?? nameof(TileKind.Ram) };
         DrawCard(canvas, rect);
         DrawTitle(canvas, v, "RAM", deviceSubtitle);
         DrawBigValue(canvas, v, usagePct, "%");
@@ -108,10 +165,10 @@ public sealed partial class TileRenderer
         _gpuWindowSeconds = window.TotalSeconds;
     }
 
-    public void DrawGpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double utilPct, ulong vramUsed, ulong vramBudget, string? deviceSubtitle = null)
+    public void DrawGpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double utilPct, ulong vramUsed, ulong vramBudget, string? deviceSubtitle = null, string? axisKey = null)
     {
         bool alert = ThresholdEnabled && utilPct >= ThresholdPercent;
-        var v = new TileVisual(TileKind.Gpu, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _gpuWindowSeconds };
+        var v = new TileVisual(TileKind.Gpu, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _gpuWindowSeconds, AxisKey = axisKey ?? nameof(TileKind.Gpu) };
         DrawCard(canvas, rect);
         DrawTitle(canvas, v, "GPU", deviceSubtitle);
         DrawBigValue(canvas, v, utilPct, "%");
@@ -144,10 +201,10 @@ public sealed partial class TileRenderer
         _netWindowSeconds = window.TotalSeconds;
     }
 
-    public void DrawDiskTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, ulong used, ulong total, double bytesPerSec, string? deviceSubtitle = null)
+    public void DrawDiskTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double usagePct, ulong used, ulong total, double bytesPerSec, string? deviceSubtitle = null, string? axisKey = null)
     {
         bool alert = ThresholdEnabled && usagePct >= ThresholdPercent;
-        var v = new TileVisual(TileKind.Disk, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _diskWindowSeconds };
+        var v = new TileVisual(TileKind.Disk, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _diskWindowSeconds, AxisKey = axisKey ?? nameof(TileKind.Disk) };
         DrawCard(canvas, rect);
         DrawTitle(canvas, v, "DISK", deviceSubtitle);
         DrawBigValue(canvas, v, usagePct, "%");
@@ -165,10 +222,10 @@ public sealed partial class TileRenderer
     /// grows to fill the freed space. NET is exempt from the threshold-alert
     /// path (no usagePct).
     /// </summary>
-    public void DrawNetworkTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double downBps, double upBps, string interfaceName, string? deviceSubtitle = null)
+    public void DrawNetworkTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double downBps, double upBps, string interfaceName, string? deviceSubtitle = null, string? axisKey = null)
     {
         // No alert path: NET has no usage percentage.
-        var v = new TileVisual(TileKind.Network, s, accent, _theme, false) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _netWindowSeconds };
+        var v = new TileVisual(TileKind.Network, s, accent, _theme, false) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _netWindowSeconds, AxisKey = axisKey ?? nameof(TileKind.Network) };
         DrawCard(canvas, rect);
         DrawTitle(canvas, v, "NET", deviceSubtitle);
         // Big value = download rate, formatted like the disk tile's throughput.
@@ -203,19 +260,19 @@ public sealed partial class TileRenderer
         float size = BigValueMaxFont;
 
         // Width constraint: value + suffix (+gap) must fit the content width.
-        using (var probe = new SKFont(SKTypeface.FromFamilyName("Segoe UI Light"), size))
+        // The probe always measures at the MAX size (scaling is linear), so the
+        // two fixed-size fonts come from the cache — no per-frame construction.
+        var probe = CachedFont("Segoe UI Light", BigValueMaxFont);
+        float textW = probe.MeasureText(text);
+        float suffixW = 0;
+        if (!string.IsNullOrEmpty(suffix))
         {
-            float textW = probe.MeasureText(text);
-            float suffixW = 0;
-            if (!string.IsNullOrEmpty(suffix))
-            {
-                using var sfx = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semilight"), size * (20f / BigValueMaxFont));
-                suffixW = sfx.MeasureText(suffix) + 6;
-            }
-            float totalW = textW + suffixW;
-            if (totalW > availW && totalW > 0)
-                size = Math.Min(size, size * (availW / totalW));
+            var sfx = CachedFont("Segoe UI Semilight", BigValueMaxFont * (20f / BigValueMaxFont));
+            suffixW = sfx.MeasureText(suffix) + 6;
         }
+        float totalW = textW + suffixW;
+        if (totalW > availW && totalW > 0)
+            size = Math.Min(size, size * (availW / totalW));
 
         // Height constraint: keep the headline from overwhelming a short tile.
         size = Math.Min(size, v.Rect.Height * 0.30f);
@@ -235,23 +292,15 @@ public sealed partial class TileRenderer
         float size = BigValueFontSize(canvas, v, literal, null);
         float baseline = v.Y + size * BigValueBaselineRatio;
         using var paint = new SKPaint { Color = v.ValueColor, IsAntialias = true };
-        using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Light"), size);
+        // Dynamic size: construct from the cached typeface (cheap part only).
+        using var font = new SKFont(TypefaceOf("Segoe UI Light"), size);
         canvas.DrawText(literal, x, baseline, font, paint);
         v.Y += size * BigValueAdvanceRatio;
     }
 
     /// <summary>Truncates text with an ellipsis so it never overflows maxWidth.</summary>
     private static string Truncate(SKCanvas canvas, string text, float maxWidth, string family, int size)
-    {
-        if (string.IsNullOrEmpty(text)) return text ?? "";
-        using var f = new SKFont(SKTypeface.FromFamilyName(family), size);
-        if (f.MeasureText(text) <= maxWidth) return text;
-        string ell = "…";
-        var sb = new System.Text.StringBuilder(text);
-        while (sb.Length > 1 && f.MeasureText(sb.ToString() + ell) > maxWidth)
-            sb.Remove(sb.Length - 1, 1);
-        return sb.ToString() + ell;
-    }
+        => FitToWidth(CachedFont(family, size), text, maxWidth);
 
     /// <summary>
     /// Draws text clipped to <paramref name="maxX"/>; when it's too wide it
@@ -295,10 +344,8 @@ public sealed partial class TileRenderer
     private void DrawCard(SKCanvas canvas, SKRect rect)
     {
         using var round = new SKRoundRect(rect, 14);
-        using var paint = _theme.TilePaint();
-        canvas.DrawRoundRect(round, paint);
-        using var border = _theme.TileBorderPaint();
-        canvas.DrawRoundRect(round, border);
+        canvas.DrawRoundRect(round, _theme.TilePaint());       // cached — do NOT dispose
+        canvas.DrawRoundRect(round, _theme.TileBorderPaint()); // cached — do NOT dispose
     }
 
     /// <summary>
@@ -475,7 +522,7 @@ public sealed partial class TileRenderer
             using var rr = new SKRoundRect(rect, 14);
             canvas.DrawRoundRect(rr, border);
             using var tPaint = new SKPaint { Color = accent, IsAntialias = true };
-            using var tFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 15);
+            var tFont = CachedFont("Segoe UI Semibold", 15);
             canvas.DrawText(tile.Title, rect.Left + TilePad, rect.Top + 30, tFont, tPaint);
         }
         finally
@@ -539,7 +586,7 @@ public sealed partial class TileRenderer
         float maxX = v.Rect.Right - affordanceReserve;
         float baseline = v.Y + 14;
         using var paint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 15);
+        var font = CachedFont("Segoe UI Semibold", 15);
 
         // The kind title and its device subtitle share ONE title row, so a
         // subtitle never pushes the bar/graph/details down — every tile advances
@@ -550,7 +597,7 @@ public sealed partial class TileRenderer
         {
             x += font.MeasureText(text) + 8;
             using var subPaint = new SKPaint { Color = _theme.TextSecondary.WithAlpha(150), IsAntialias = true };
-            using var subFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 12);
+            var subFont = CachedFont("Segoe UI", 12);
             DrawTextFaded(canvas, subtitle!, x, baseline, maxX, subFont, subPaint, _theme.TileBackground);
         }
         v.Y += 30; // constant, with or without a subtitle
@@ -564,11 +611,11 @@ public sealed partial class TileRenderer
         float size = BigValueFontSize(canvas, v, valStr, suffix);
         float baseline = v.Y + size * BigValueBaselineRatio;
         using var paint = new SKPaint { Color = v.ValueColor, IsAntialias = true };
-        using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI Light"), size);
+        using var font = new SKFont(TypefaceOf("Segoe UI Light"), size);
         canvas.DrawText(valStr, x, baseline, font, paint);
 
         using var suffixPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var suffixFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semilight"), size * (20f / BigValueMaxFont));
+        using var suffixFont = new SKFont(TypefaceOf("Segoe UI Semilight"), size * (20f / BigValueMaxFont));
         float valueWidth = font.MeasureText(valStr);
         canvas.DrawText(suffix, x + valueWidth + 6, baseline, suffixFont, suffixPaint);
         v.Y += size * BigValueAdvanceRatio;
@@ -622,7 +669,7 @@ public sealed partial class TileRenderer
         if (history2 != null)
             foreach (var s in history2)
                 if (s.Item2 > dataMax) dataMax = s.Item2;
-        double axis = NextAxisMax(v.Kind, dataMax, isBytes);
+        double axis = NextAxisMax(v.AxisKey, dataMax, isBytes);
         v.SparkRange = (0, axis);
         v.SparkMaxLabel = isBytes ? Format.Rate((ulong)axis, v.Settings.UnitMode, v.Kind) : $"{axis:0}%";
         // Reference line pinned at 90% of the axis on every tile: near the top,
@@ -645,24 +692,25 @@ public sealed partial class TileRenderer
         10000L * 1024 * 1024, 20000L * 1024 * 1024,
     };
 
-    // Per-kind axis ceiling with hysteresis (renderer-owned state; each
-    // window's renderer tracks its own copy — a kind lives in one window).
-    private readonly Dictionary<TileKind, double> _axisMax = new();
+    // Per-TILE axis ceiling with hysteresis (renderer-owned state; each window's
+    // renderer tracks its own copy). Keyed by the tile's AxisKey (ConfigKey) so
+    // two tiles of the same kind (e.g. dual GPUs) don't share one ladder.
+    private readonly Dictionary<string, double> _axisMax = new(StringComparer.Ordinal);
 
     /// <summary>Axis ceiling for a tile this frame: the nice-ladder rung above
     /// dataMax × 1.2, with hysteresis — jumps up immediately, steps down only
     /// when the new target falls below 70% of the current rung. Prevents the
     /// axis (and with it the whole curve) from flapping between adjacent rungs.
     /// </summary>
-    private double NextAxisMax(TileKind kind, double dataMax, bool isBytes)
+    private double NextAxisMax(string axisKey, double dataMax, bool isBytes)
     {
         var steps = isBytes ? ByteSteps : PercentSteps;
         double floor = isBytes ? 10 * 1024 : 10;
         double ceil = isBytes ? double.PositiveInfinity : 100;
         double target = NiceCeiling(Math.Max(dataMax * 1.2, floor), steps, floor, ceil);
-        _axisMax.TryGetValue(kind, out double cur);
+        _axisMax.TryGetValue(axisKey, out double cur);
         if (cur <= 0 || target > cur || target < cur * 0.7) cur = target;
-        _axisMax[kind] = cur;
+        _axisMax[axisKey] = cur;
         return cur;
     }
 
@@ -771,7 +819,7 @@ public sealed partial class TileRenderer
         // Legend (dual graphs): a colored swatch + label per series, top-left.
         if (v.SparkLegendA != null && v.SparkLegendB != null)
         {
-            using var legFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 10);
+            var legFont = CachedFont("Segoe UI", 10);
             using var legPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
             using var swA = new SKPaint { Color = v.ValueColor, Style = SKPaintStyle.Stroke, StrokeWidth = 2, IsAntialias = true };
             using var swB = new SKPaint { Color = v.Accent2, Style = SKPaintStyle.Stroke, StrokeWidth = 2, IsAntialias = true };
@@ -817,7 +865,7 @@ public sealed partial class TileRenderer
         if (!string.IsNullOrEmpty(v.SparkMaxLabel))
         {
             using var lblPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-            using var lblFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 10);
+            var lblFont = CachedFont("Segoe UI", 10);
             float lw = lblFont.MeasureText(v.SparkMaxLabel);
             canvas.DrawText(v.SparkMaxLabel, x0 + w - lw, y0 + 11, lblFont, lblPaint);
         }
@@ -1009,7 +1057,7 @@ public sealed partial class TileRenderer
         float y = pane.Top + PanePad;
 
         using var headerPaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        using var headerFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 13);
+        var headerFont = CachedFont("Segoe UI Semibold", 13);
         canvas.DrawText("Customize", x, y + 12, headerFont, headerPaint);
         y += PaneHeaderGap;
 
@@ -1025,7 +1073,7 @@ public sealed partial class TileRenderer
 
         // Units segmented control (Auto / Bits / Bytes).
         using var unitLabelPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var unitLabelFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 12);
+        var unitLabelFont = CachedFont("Segoe UI", 12);
         canvas.DrawText("Units", x, y + 11, unitLabelFont, unitLabelPaint);
         string[] unitLabels = { "Auto", "Bits", "Bytes" };
         int unitIdx = (int)v.Settings.UnitMode;
@@ -1037,7 +1085,7 @@ public sealed partial class TileRenderer
         y += 10;
 
         using var subPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var subFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 12);
+        var subFont = CachedFont("Segoe UI", 12);
         canvas.DrawText("Accent", x, y + 11, subFont, subPaint);
         y += PaneAccentLabelH;
 
@@ -1232,7 +1280,7 @@ public sealed partial class TileRenderer
         float rx = p.Right - pad;
 
         using var headerPaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        using var headerFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 15);
+        var headerFont = CachedFont("Segoe UI Semibold", 15);
         canvas.DrawText("Settings", lx, p.Top + pad + 14, headerFont, headerPaint);
         DrawCloseGlyph(canvas, layout.Close, hoverClose);
 
@@ -1274,7 +1322,7 @@ public sealed partial class TileRenderer
 
         // ---- Tiles section: full width ----
         using var secPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        using var secFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 12);
+        var secFont = CachedFont("Segoe UI Semibold", 12);
         float tilesHeaderY = layout.TileChips[0].Top - 4 - 13;
         canvas.DrawText("Tiles", lx, tilesHeaderY + 13, secFont, secPaint);
         var chipKinds = new[] { TileKind.Cpu, TileKind.Ram, TileKind.Gpu, TileKind.Disk, TileKind.Network };
@@ -1311,7 +1359,7 @@ public sealed partial class TileRenderer
     private void DrawRowLabel(SKCanvas canvas, float x, float y, float rowH, string text)
     {
         using var paint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        using var font = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 13);
+        var font = CachedFont("Segoe UI", 13);
         // Vertically center the label within the row height (baseline ~ 0.72 * h).
         canvas.DrawText(text, x, y + rowH * 0.72f, font, paint);
     }
@@ -1339,7 +1387,7 @@ public sealed partial class TileRenderer
             using var p = new SKPaint { Color = on ? TilePalette.Soft(accent) : _theme.TileBorder, Style = SKPaintStyle.Fill, IsAntialias = true };
             canvas.DrawRoundRect(rr, p);
             using var tPaint = new SKPaint { Color = on ? accent : _theme.TextSecondary, IsAntialias = true };
-            using var tFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 12);
+            var tFont = CachedFont("Segoe UI Semibold", 12);
             float tw = tFont.MeasureText(labels[i]);
             canvas.DrawText(labels[i], segs[i].MidX - tw / 2, segs[i].MidY + 4, tFont, tPaint);
         }
@@ -1354,7 +1402,7 @@ public sealed partial class TileRenderer
         using var p = new SKPaint { Color = TilePalette.Soft(accent), Style = SKPaintStyle.Fill, IsAntialias = true };
         canvas.DrawRoundRect(rr, p);
         using var tPaint = new SKPaint { Color = accent, IsAntialias = true };
-        using var tFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 14);
+        var tFont = CachedFont("Segoe UI Semibold", 14);
         float tw = tFont.MeasureText(valueText);
         canvas.DrawText(valueText, value.MidX - tw / 2, value.MidY + 5, tFont, tPaint);
     }
@@ -1365,7 +1413,7 @@ public sealed partial class TileRenderer
         using var p = new SKPaint { Color = TilePalette.Soft(accent), Style = SKPaintStyle.Fill, IsAntialias = true };
         canvas.DrawRoundRect(rr, p);
         using var tPaint = new SKPaint { Color = accent, IsAntialias = true };
-        using var tFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 16);
+        var tFont = CachedFont("Segoe UI Semibold", 16);
         float tw = tFont.MeasureText(glyph);
         canvas.DrawText(glyph, r.MidX - tw / 2, r.MidY + 6, tFont, tPaint);
     }
@@ -1426,7 +1474,7 @@ public sealed partial class TileRenderer
             Color = enabled ? new SKColor(0x12, 0x16, 0x1C) : _theme.TextSecondary,
             IsAntialias = true,
         };
-        using var tFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 11);
+        var tFont = CachedFont("Segoe UI Semibold", 11);
         float tw = tFont.MeasureText(label);
         canvas.DrawText(label, r.MidX - tw / 2, r.MidY + 4, tFont, tPaint);
     }
@@ -1451,7 +1499,7 @@ public sealed partial class TileRenderer
     private void DrawToggleRow(SKCanvas canvas, SKRect row, string label, bool on, SKColor accent)
     {
         using var labelPaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        using var labelFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 13);
+        var labelFont = CachedFont("Segoe UI", 13);
         canvas.DrawText(label, row.Left, row.Top + 15, labelFont, labelPaint);
 
         float sw = 34, sh = 18;
@@ -1489,7 +1537,7 @@ public sealed partial class TileRenderer
         };
         canvas.DrawRoundRect(rr, p);
         using var tPaint = new SKPaint { Color = subtle ? _theme.TextPrimary : accent, IsAntialias = true };
-        using var tFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI Semibold"), 12);
+        var tFont = CachedFont("Segoe UI Semibold", 12);
         float tw = tFont.MeasureText(text);
         canvas.DrawText(text, r.MidX - tw / 2, r.MidY + 4, tFont, tPaint);
     }
@@ -1537,6 +1585,8 @@ public sealed class TileVisual
     /// <summary>Legend label for the second series (e.g. "R", "↑").</summary>
     public string? SparkLegendB { get; set; }
     public bool Alert { get; }
+    /// <summary>Stable identity used for per-tile axis hysteresis (the tile's ConfigKey).</summary>
+    public string AxisKey { get; set; } = "";
     private readonly Theme _theme;
 
     public TileVisual(TileKind kind, TileSettings settings, SKColor accent, Theme theme, bool alert)
@@ -1583,8 +1633,7 @@ public sealed class TileVisual
                 // Baseline = content bottom (Y) + gap + font ascent (~font size).
                 float detailsBaseline = Y + GapAboveDetails + DetailsFontSize;
                 using (var p = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true })
-                using (var f = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), DetailsFontSize))
-                    renderer.DrawTextFaded(canvas, SecondaryText!, Rect.Left + pad, detailsBaseline, maxX, f, p, _theme.TileBackground);
+                    renderer.DrawTextFaded(canvas, SecondaryText!, Rect.Left + pad, detailsBaseline, maxX, TileRenderer.CachedFont("Segoe UI", DetailsFontSize), p, _theme.TileBackground);
                 graphTop = Y + GapAboveDetails + DetailsLineH + GapBelowDetails;
             }
             else
@@ -1602,8 +1651,7 @@ public sealed class TileVisual
         {
             // No graph: details pinned to the bottom only when it fits vertically.
             using var p = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-            using var f = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), DetailsFontSize);
-            renderer.DrawTextFaded(canvas, SecondaryText, Rect.Left + pad, bottom, maxX, f, p, _theme.TileBackground);
+            renderer.DrawTextFaded(canvas, SecondaryText, Rect.Left + pad, bottom, maxX, TileRenderer.CachedFont("Segoe UI", DetailsFontSize), p, _theme.TileBackground);
         }
     }
 }

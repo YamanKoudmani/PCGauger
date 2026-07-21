@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using PCGauger.Metrics;
@@ -6,21 +5,46 @@ using PCGauger.Metrics;
 namespace PCGauger.Metrics.Providers;
 
 /// <summary>
-/// Stretch feature (chunk 1, item 7): top process by CPU, by RAM, and by GPU.
-/// CPU/RAM use unprivileged Process enumeration — WorkingSet64 for RAM and a
-/// TotalProcessorTime delta for CPU%. GPU uses the same PDH wildcard counter
-/// family GpuProvider consumes ("\GPU Engine(*)\Utilization Percentage"); each
-/// instance name encodes the owning pid as "pid_&lt;n&gt;_luid_..._engtype_...".
-/// Cheap because we already poll on a timer.
+/// Stretch feature (chunk 1, item 7): top process by CPU, by RAM, by disk I/O,
+/// and by GPU.
+///
+/// CPU / RAM / Disk come from ONE PDH query holding three wildcard counters
+/// ("\Process(*)\% Processor Time", "\Process(*)\Working Set",
+/// "\Process(*)\IO Data Bytes/sec"): a single PdhCollectQueryData plus three
+/// formatted-array reads yields every process's three metrics AND its display
+/// name (the instance string). This replaces the old implementation, which
+/// per 1s tick allocated ~200-300 Process objects (Process.GetProcesses),
+/// made ~3 syscalls per process (WorkingSet64 / TotalProcessorTime /
+/// ProcessName), re-enumerated the "Process" category instance names, and
+/// called NextValue() on ~200+ cached PerformanceCounter objects — the single
+/// most expensive provider tick in the app by an order of magnitude.
+///
+/// Semantics preserved: names have no ".exe" and duplicate instances' "#n"
+/// suffix is stripped for display (as before); CPU% is divided by the core
+/// count (PDH's % Processor Time sums across cores; the old delta math did
+/// the same normalization); "Idle" and "_Total" instances are filtered
+/// (Process.GetProcesses never returned the Idle process). Rate counters
+/// ("% Processor Time", "IO Data Bytes/sec") report no data on the first
+/// collect — the footer shows its "-" warm-up state for one tick, exactly
+/// like the old cached-counter design. GPU top still uses the same PDH
+/// wildcard counter family GpuProvider consumes ("\GPU Engine(*)\Utilization
+/// Percentage"); each instance name encodes the owning pid as "pid_&lt;n&gt;_...".
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class TopProcessProvider : IMetricProvider
 {
-    private readonly Dictionary<int, (string Name, TimeSpan Cpu)> _prev = new();
+    // One PDH query for all three process-wide tops.
+    private IntPtr _procQuery;
+    private IntPtr _cpuCounter;   // \Process(*)\% Processor Time
+    private IntPtr _wsCounter;    // \Process(*)\Working Set (bytes, instantaneous)
+    private IntPtr _ioCounter;    // \Process(*)\IO Data Bytes/sec
+
     private string _topCpuName = "-";
     private double _topCpuPct;
     private string _topRamName = "-";
     private ulong _topRamBytes;
+    private string _topDiskName = "-";
+    private double _topDiskBps;
 
     // GPU: PDH query over the wildcard GPU Engine counter.
     private IntPtr _gpuQuery;
@@ -28,23 +52,9 @@ public sealed class TopProcessProvider : IMetricProvider
     private string _topGpuName = "-";
     private double _topGpuPct;
 
-    // Disk: top process by I/O throughput (bytes/sec), read via the unprivileged
-    // "Process" performance counter category ("IO Data Bytes/sec" = read+write
-    // combined). Instance names are process names; duplicates get a "#n" suffix
-    // which we strip for display. Cheap and admin-free.
-    //
-    // Counters are CACHED across polls (keyed by instance name): a
-    // PerformanceCounter returns 0 on its first NextValue() because there is
-    // no prior sample to delta against, so a fresh counter every poll would
-    // always read 0 and the disk top would stay "-". Caching lets the
-    // 2nd+ sample report the real rate. Gone instances are disposed.
-    private string _topDiskName = "-";
-    private double _topDiskBps;
-    private readonly Dictionary<string, PerformanceCounter> _diskCounters = new();
-
-    // Cache pid -> friendly name. Lookups are expensive (Process construction),
-    // so we keep the last good name even across polls. Dead pids are pruned
-    // lazily when name resolution fails.
+    // Cache pid -> friendly name (GPU top only). Lookups are expensive (Process
+    // construction), so we keep the last good name even across polls. Dead pids
+    // are pruned lazily when name resolution fails.
     private readonly Dictionary<int, string> _pidNames = new();
 
     public TopProcessProvider()
@@ -54,60 +64,145 @@ public sealed class TopProcessProvider : IMetricProvider
             if (NativeMethods.PdhAddCounter(_gpuQuery, @"\GPU Engine(*)\Utilization Percentage", IntPtr.Zero, out _gpuCounter) != 0)
                 _gpuCounter = IntPtr.Zero;
         }
+
+        if (NativeMethods.PdhOpenQuery(null, IntPtr.Zero, out _procQuery) == 0)
+        {
+            if (NativeMethods.PdhAddCounter(_procQuery, @"\Process(*)\% Processor Time", IntPtr.Zero, out _cpuCounter) != 0)
+                _cpuCounter = IntPtr.Zero;
+            if (NativeMethods.PdhAddCounter(_procQuery, @"\Process(*)\Working Set", IntPtr.Zero, out _wsCounter) != 0)
+                _wsCounter = IntPtr.Zero;
+            if (NativeMethods.PdhAddCounter(_procQuery, @"\Process(*)\IO Data Bytes/sec", IntPtr.Zero, out _ioCounter) != 0)
+                _ioCounter = IntPtr.Zero;
+        }
     }
 
     public void Update(TimeSpan elapsed)
     {
-        double elapsedSec = elapsed.TotalSeconds;
-        if (elapsedSec <= 0) elapsedSec = 0.25;
-
-        UpdateCpuRam(elapsedSec);
+        UpdateProc();
         UpdateGpu();
-        UpdateDisk();
     }
 
-    private void UpdateCpuRam(double elapsedSec)
+    private void UpdateProc()
     {
-        Process[] processes = Process.GetProcesses();
-        string topCpu = "-";
-        double topCpuPct = 0;
-        string topRam = "-";
-        ulong topRamBytes = 0;
-
-        foreach (var p in processes)
+        try
         {
-            try
-            {
-                ulong ws = (ulong)p.WorkingSet64;
-                if (ws > topRamBytes)
-                {
-                    topRamBytes = ws;
-                    topRam = p.ProcessName;
-                }
+            if (_procQuery == IntPtr.Zero || NativeMethods.PdhCollectQueryData(_procQuery) != 0)
+                return; // PDH unavailable or a transient collect failure: keep last good.
 
-                var cpu = p.TotalProcessorTime;
-                if (_prev.TryGetValue(p.Id, out var prev))
+            // CPU: PDH sums the process's threads across ALL cores; divide by
+            // the core count to match the old delta-based normalization.
+            if (_cpuCounter != IntPtr.Zero)
+            {
+                string top = "-";
+                double topPct = 0;
+                foreach (var (name, value) in ReadCounterArray(_cpuCounter))
                 {
-                    double deltaSec = (cpu - prev.Cpu).TotalSeconds;
-                    double pct = (deltaSec / elapsedSec) * 100.0 / Environment.ProcessorCount;
-                    if (pct > topCpuPct)
+                    double pct = value / Environment.ProcessorCount;
+                    if (pct > topPct)
                     {
-                        topCpuPct = pct;
-                        topCpu = p.ProcessName;
+                        topPct = pct;
+                        top = name;
                     }
                 }
-                _prev[p.Id] = (p.ProcessName, cpu);
+                // A no-data first sample (rate counters need two collects)
+                // yields no winner — keep last good values in that case.
+                if (top != "-")
+                {
+                    _topCpuName = top;
+                    _topCpuPct = topPct;
+                }
             }
-            catch
+
+            // RAM: Working Set is instantaneous, so it has data from the very
+            // first collect.
+            if (_wsCounter != IntPtr.Zero)
             {
-                // Access denied / exited mid-enumeration — skip.
+                string top = "-";
+                double topBytes = 0;
+                foreach (var (name, value) in ReadCounterArray(_wsCounter))
+                {
+                    if (value > topBytes)
+                    {
+                        topBytes = value;
+                        top = name;
+                    }
+                }
+                if (top != "-")
+                {
+                    _topRamName = top;
+                    _topRamBytes = (ulong)Math.Max(0, topBytes);
+                }
+            }
+
+            // Disk: same counter the old PerformanceCounter cache read, but as
+            // one formatted-array read instead of ~200+ per-instance NextValue
+            // calls. Rate counter — no winner on the first collect.
+            if (_ioCounter != IntPtr.Zero)
+            {
+                string top = "-";
+                double topBps = 0;
+                foreach (var (name, value) in ReadCounterArray(_ioCounter))
+                {
+                    if (value > topBps)
+                    {
+                        topBps = value;
+                        top = name;
+                    }
+                }
+                if (top != "-")
+                {
+                    _topDiskName = top;
+                    _topDiskBps = topBps;
+                }
             }
         }
+        catch
+        {
+            // PDH failures must never escape Update — keep last good values.
+        }
+    }
 
-        _topCpuName = topCpu;
-        _topCpuPct = topCpuPct;
-        _topRamName = topRam;
-        _topRamBytes = topRamBytes;
+    /// <summary>
+    /// Reads a wildcard counter's formatted array and yields (displayName, value)
+    /// per live instance. Instance names are process names without ".exe";
+    /// duplicate instances ("chrome#2") are stripped to "chrome" for display.
+    /// "_Total" and "Idle" are filtered (the old Process enumeration never
+    /// included the Idle process; _Total is an aggregate, not a process).
+    /// Items with a non-zero CStatus (e.g. rate counters before their second
+    /// sample) are skipped.
+    /// </summary>
+    private static IEnumerable<(string Name, double Value)> ReadCounterArray(IntPtr counter)
+    {
+        uint size = 0;
+        uint count = 0;
+        // First call: get required buffer size.
+        NativeMethods.PdhGetFormattedCounterArrayW(counter, NativeMethods.PDH_FMT_DOUBLE, ref size, ref count, IntPtr.Zero);
+        if (size <= 0) yield break;
+
+        IntPtr buffer = Marshal.AllocHGlobal((int)size);
+        try
+        {
+            int hr = NativeMethods.PdhGetFormattedCounterArrayW(counter, NativeMethods.PDH_FMT_DOUBLE, ref size, ref count, buffer);
+            if (hr != 0 || count == 0) yield break;
+
+            int stride = Marshal.SizeOf<NativeMethods.PDH_FMT_COUNTERVALUE_ITEM_W>();
+            for (int i = 0; i < count; i++)
+            {
+                var item = Marshal.PtrToStructure<NativeMethods.PDH_FMT_COUNTERVALUE_ITEM_W>(buffer + i * stride);
+                if (item.FmtValue.CStatus != 0) continue; // no data for this instance yet
+                if (item.szName == IntPtr.Zero) continue;
+                string? raw = Marshal.PtrToStringUni(item.szName);
+                if (string.IsNullOrEmpty(raw)) continue;
+                if (raw.Equals("_Total", StringComparison.OrdinalIgnoreCase)) continue;
+                if (raw.Equals("Idle", StringComparison.OrdinalIgnoreCase)) continue;
+                int hash = raw.IndexOf('#');
+                yield return (hash < 0 ? raw : raw.Substring(0, hash), item.FmtValue.DoubleValue);
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
     }
 
     private void UpdateGpu()
@@ -178,68 +273,6 @@ public sealed class TopProcessProvider : IMetricProvider
         _topGpuPct = topGpuPct;
     }
 
-    private void UpdateDisk()
-    {
-        string topDisk = "-";
-        double topDiskBps = 0;
-
-        try
-        {
-            // Refresh the cached counter set against the live instance list.
-            // New instances get a counter (its first NextValue() returns 0, the
-            // next poll returns the real rate); gone instances are disposed.
-            var category = new PerformanceCounterCategory("Process");
-            string[] instances = category.GetInstanceNames();
-
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var inst in instances)
-            {
-                if (inst.Equals("_Total", StringComparison.OrdinalIgnoreCase)) continue;
-                seen.Add(inst);
-                if (!_diskCounters.TryGetValue(inst, out var pc))
-                {
-                    try { pc = new PerformanceCounter("Process", "IO Data Bytes/sec", inst, true); }
-                    catch { continue; }
-                    _diskCounters[inst] = pc;
-                }
-
-                try
-                {
-                    // Cached counter: 2nd+ call returns the real bytes/sec delta.
-                    double bps = pc.NextValue();
-                    if (bps > topDiskBps)
-                    {
-                        topDiskBps = bps;
-                        // Strip the "#n" duplicate suffix for a clean display name.
-                        int hash = inst.IndexOf('#');
-                        topDisk = hash < 0 ? inst : inst.Substring(0, hash);
-                    }
-                }
-                catch
-                {
-                    // Instance vanished mid-read — drop it next refresh.
-                }
-            }
-
-            // Dispose counters whose process has exited.
-            foreach (var key in _diskCounters.Keys.ToArray())
-            {
-                if (!seen.Contains(key))
-                {
-                    try { _diskCounters[key].Dispose(); } catch { }
-                    _diskCounters.Remove(key);
-                }
-            }
-        }
-        catch
-        {
-            // Performance counters unavailable (rare) — keep last good values.
-        }
-
-        _topDiskName = topDisk;
-        _topDiskBps = topDiskBps;
-    }
-
     /// <summary>
     /// Parse the owning pid from a GPU Engine instance name of the form
     /// "pid_1234_luid_0x..._engtype_3D". Returns -1 if the token is missing
@@ -275,7 +308,7 @@ public sealed class TopProcessProvider : IMetricProvider
         string name = "-";
         try
         {
-            using var p = Process.GetProcessById(pid);
+            using var p = System.Diagnostics.Process.GetProcessById(pid);
             name = p.ProcessName;
             _pidNames[pid] = name;
         }
@@ -316,10 +349,9 @@ public sealed class TopProcessProvider : IMetricProvider
     {
         if (_gpuCounter != IntPtr.Zero) NativeMethods.PdhRemoveCounter(_gpuCounter);
         if (_gpuQuery != IntPtr.Zero) NativeMethods.PdhCloseQuery(_gpuQuery);
-        foreach (var pc in _diskCounters.Values)
-        {
-            try { pc.Dispose(); } catch { }
-        }
-        _diskCounters.Clear();
+        if (_cpuCounter != IntPtr.Zero) NativeMethods.PdhRemoveCounter(_cpuCounter);
+        if (_wsCounter != IntPtr.Zero) NativeMethods.PdhRemoveCounter(_wsCounter);
+        if (_ioCounter != IntPtr.Zero) NativeMethods.PdhRemoveCounter(_ioCounter);
+        if (_procQuery != IntPtr.Zero) NativeMethods.PdhCloseQuery(_procQuery);
     }
 }

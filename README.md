@@ -35,13 +35,13 @@ No admin, no drivers, no background services — everything comes from unprivile
 - **Per-tile customization** — each tile has its own settings gear controlling:
   - Accent color override
   - Title, big value, usage bar, sparkline, and secondary line visibility (each independently toggleable)
-- **Sparklines** backed by a rolling history buffer with a configurable global time window (default 5 minutes).
+- **Sparklines** that scroll smoothly without stuttering, backed by a rolling history buffer with a configurable global time window (default 5 minutes).
 
 ### Appearance & behavior
 
-- **Three themes**: Midnight (default dark), Obsidian (OLED true black), Daybreak (light). Swaps apply instantly.
+- **Six themes** — Midnight, Obsidian (OLED true black), Daybreak (light), Transparent (see-through, so tiles float right on your desktop), and Frost Light / Frost Dark (frosted glass that softly blurs whatever is behind the window). Frost Dark is the default. Swaps apply instantly.
 - **Threshold alerts** — tiles shift color when usage crosses a configurable percentage (50–100%).
-- **Units control** — adaptive auto-scaling or fixed MB/GB; configurable decimal precision.
+- **Units control** — automatic scaling or fixed bits/bytes per tile, with memory and disk sizes shown the same way Task Manager shows them; configurable decimal precision.
 - **Kiosk mode** — fullscreen, auto-detects the mini display panel.
 - **Always-on-top** toggle (applies to detached tile windows too).
 - **Launch at startup** via `HKCU\...\Run` — still no elevation required.
@@ -54,8 +54,8 @@ All settings live in `%LOCALAPPDATA%\PCGauger\config.json` — theme, units, thr
 ### Architecture
 
 - `IMetricProvider` interface with immutable snapshots published on a polling timer — one provider throwing can't take down the window.
-- Per-metric refresh rates (CPU 250 ms, RAM 500 ms) tuned to how fast each number actually moves.
-- GPU-backed SkiaSharp surface keeps the app's own CPU footprint low, since it's meant to run alongside games.
+- Metrics refresh once per second while the graphs keep animating smoothly between updates.
+- The interface is drawn by the app itself in software, keeping its own CPU use negligible — important for something meant to run alongside games, even with the transparency effects on.
 
 ## Requirements
 

@@ -107,22 +107,22 @@ public sealed class Theme
         new SKColor(0xFF, 0xFF, 0xFF)); // pane bg
 
     /// <summary>
-    /// Dark glass cards floating on a crystal-clear desktop (Backdrop.Transparent).
+    /// Opaque dark cards floating on a crystal-clear desktop (Backdrop.Transparent).
     /// Background alpha is 0 (never painted) — wherever no tile/surface covers, the
-    /// raw desktop shows through. Dark translucent tiles work against both bright
-    /// and dark wallpapers thanks to a defined border edge.</summary>
+    /// raw desktop shows through. Tiles, borders, footer and panes are fully opaque;
+    /// only the gaps between them are see-through.</summary>
     public static readonly Theme Transparent = new(
         "Transparent",
         new SKColor(0x00, 0x00, 0x00, 0x00), // bg — fully transparent (never painted)
-        new SKColor(0x18, 0x1D, 0x26, 0x9E), // tile — dark translucent with slight blue cast (alpha ~158)
-        new SKColor(0x34, 0x3D, 0x4C, 0x70), // border — lighter translucent, defines card edges (alpha ~112)
+        new SKColor(0x18, 0x1D, 0x26),       // tile — opaque dark with slight blue cast
+        new SKColor(0x34, 0x3D, 0x4C),       // border — opaque lighter edge
         new SKColor(0xF2, 0xF5, 0xF8),       // text primary
         new SKColor(0x8B, 0x95, 0xA3),       // text secondary
         new SKColor(0x4C, 0x9A, 0xFF),       // accent
-        new SKColor(0x1E, 0x3A, 0x66, 0x80), // accent soft — translucent
+        new SKColor(0x1E, 0x3A, 0x66, 0x80), // accent soft — translucent (inside opaque cards)
         new SKColor(0x5C, 0xB8, 0x5C),       // sparkline
-        new SKColor(0x14, 0x18, 0x20, 0xA0), // footer band — translucent dark (alpha ~160)
-        new SKColor(0x1C, 0x22, 0x2C, 0xE6), // pane bg — near-opaque dark (alpha ~230)
+        new SKColor(0x14, 0x18, 0x20),       // footer band — opaque dark
+        new SKColor(0x1C, 0x22, 0x2C),       // pane bg — opaque dark
         WindowBackdrop.Transparent);
 
     /// <summary>

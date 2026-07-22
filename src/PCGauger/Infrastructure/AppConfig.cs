@@ -74,7 +74,7 @@ public sealed class AppConfig
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PCGauger");
     private static readonly string FilePath = Path.Combine(DirectoryPath, "config.json");
 
-    public string ThemeName { get; set; } = "Midnight";
+    public string ThemeName { get; set; } = "Frost Dark";
     public bool LaunchAtStartup { get; set; }
     public bool AlwaysOnTop { get; set; }
     public bool KioskMode { get; set; }

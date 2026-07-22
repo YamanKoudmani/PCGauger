@@ -578,7 +578,16 @@ public sealed partial class TileRenderer
 
         // ---- right column: theme / graph span / decimals segments ----
         float ry = bodyTop;
-        var themeSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segLabelH + smallGap + segH + toggleGap;
+        // Theme: 6 themes in 2 rows of 3.
+        float themeRow1Y = ry + segLabelH + smallGap;
+        var themeRow1 = SegmentRects(rightX, rx, themeRow1Y, segH, 3);
+        float themeRow2Y = themeRow1Y + segH + smallGap;
+        var themeRow2 = SegmentRects(rightX, rx, themeRow2Y, segH, 3);
+        var themeSegs = new List<SKRect>(6);
+        themeSegs.AddRange(themeRow1);
+        themeSegs.AddRange(themeRow2);
+        ry += segLabelH + smallGap + segH + smallGap + segH + toggleGap;
+
         var graphSpanSegs = SegmentRects(rightX, rx, ry + segLabelH, segH, 4); ry += segLabelH + smallGap + segH + toggleGap;
         var decimalsSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segLabelH + smallGap + segH + toggleGap;
         float rightBottom = ry;
@@ -755,7 +764,7 @@ public sealed partial class TileRenderer
             $"{config.ThresholdPercent:0}%", _theme.Accent);
 
         DrawRowLabel(canvas, layout.ThemeSegments[0].Left, layout.ThemeSegments[0].Top - segLabelH, segLabelH, "Theme");
-        string[] themeLabels = { "Midnight", "Obsidian", "Daybreak" };
+        string[] themeLabels = { "Midnight", "Obsidian", "Daybreak", "Transparent", "Frost Light", "Frost Dark" };
         int themeIdx = IndexOfTheme(currentTheme.Name);
         DrawSegments(canvas, layout.ThemeSegments, themeLabels, themeIdx, _theme.Accent);
 

@@ -55,16 +55,29 @@ public sealed class RollingHistory
     }
 
     /// <summary>
-    /// Return samples within the retention window, oldest first.
+    /// Return samples within the retention window, oldest first. The result is
+    /// preceded by the single most recent sample BEFORE the window (when one
+    /// exists) so the renderer can interpolate the curve's exact value at the
+    /// sliding window boundary instead of popping each time a sample expires.
     /// </summary>
     public IReadOnlyList<(DateTimeOffset, double)> Snapshot()
     {
         var cutoff = DateTimeOffset.UtcNow - _window;
-        var list = new List<(DateTimeOffset, double)>(_samples.Count);
+        var list = new List<(DateTimeOffset, double)>(_samples.Count + 1);
+        (DateTimeOffset Timestamp, double Value) context = default;
+        bool hasContext = false;
         foreach (var s in _samples)
         {
             if (s.Timestamp >= cutoff)
+            {
+                if (list.Count == 0 && hasContext) list.Add(context);
                 list.Add(s);
+            }
+            else
+            {
+                context = s; // track the latest pre-window sample
+                hasContext = true;
+            }
         }
         return list;
     }

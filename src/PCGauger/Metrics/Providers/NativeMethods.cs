@@ -84,14 +84,16 @@ internal static class NativeMethods
         RelationAll = 0xFFFF,
     }
 
-    // Canonical x64 layout: ProcessorMask (8) + Relationship (4) + 8-byte union
-    // payload (flags/numa/cache/group) + 4-byte padding -> 24 bytes.
+    // Canonical x64 layout: ProcessorMask (8) + Relationship (4) + 4-byte
+    // padding + 16-byte union -> 32 bytes. The union matches CACHE_DESCRIPTOR
+    // / ULONGLONG[2] / NUMA / core-flags (the largest member is 16 bytes).
     [StructLayout(LayoutKind.Sequential)]
     public struct SYSTEM_LOGICAL_PROCESSOR_INFORMATION
     {
         public UIntPtr ProcessorMask;
         public uint Relationship;
-        public ulong Payload; // union: flags (core), NumaNode, Cache, Group
+        public ulong Reserved1; // first half of the 16-byte union
+        public ulong Reserved2; // second half of the 16-byte union
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]

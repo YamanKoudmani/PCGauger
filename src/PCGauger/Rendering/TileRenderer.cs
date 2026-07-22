@@ -333,7 +333,7 @@ public sealed partial class TileRenderer
         fade.Shader = SKShader.CreateLinearGradient(
             new SKPoint(fadeStart, 0),
             new SKPoint(maxX, 0),
-            new[] { fadeInto.WithAlpha(0), fadeInto.WithAlpha(255) },
+            new[] { fadeInto.WithAlpha(0), fadeInto },
             new[] { 0f, 1f },
             SKShaderTileMode.Clamp);
         canvas.DrawRect(fadeStart, clip.Top, FadeWidth, clip.Height, fade);
@@ -343,6 +343,22 @@ public sealed partial class TileRenderer
 
     private void DrawCard(SKCanvas canvas, SKRect rect)
     {
+        // For translucent/frosted themes (cards float over a live desktop), add a
+        // soft shadow that separates the card from whatever is behind it. The
+        // shadow is omitted for opaque themes so they stay exactly as-is.
+        if (_theme.Backdrop != WindowBackdrop.Opaque)
+        {
+            using var shadow = new SKPaint
+            {
+                IsAntialias = true,
+                Color = new SKColor(0x00, 0x00, 0x00, 0x30),
+                MaskFilter = SKMaskFilter.CreateBlur(SKBlurStyle.Normal, 8),
+            };
+            var shifted = new SKRect(rect.Left + 1, rect.Top + 3, rect.Right + 1, rect.Bottom + 3);
+            using var shadowRR = new SKRoundRect(shifted, 14);
+            canvas.DrawRoundRect(shadowRR, shadow);
+        }
+
         using var round = new SKRoundRect(rect, 14);
         canvas.DrawRoundRect(round, _theme.TilePaint());       // cached — do NOT dispose
         canvas.DrawRoundRect(round, _theme.TileBorderPaint()); // cached — do NOT dispose
@@ -758,15 +774,59 @@ public sealed partial class TileRenderer
 
         SKPoint[] MapPoints(IReadOnlyList<(DateTimeOffset, double)> hist)
         {
-            var pts = new SKPoint[hist.Count];
-            for (int i = 0; i < hist.Count; i++)
+            int n = hist.Count;
+
+            float MapY(double val)
+            {
+                double norm = (val - v.SparkRange.Min) / range;
+                norm = Math.Max(0, Math.Min(1, norm));
+                return y0 + h - (float)norm * h;
+            }
+
+            // Judder-free edges: samples land and expire only once per second,
+            // so plotting the boundary samples directly makes both ends of the
+            // curve pop each tick. Instead the boundary samples are held back
+            // and the curve ends in edge points whose Y lerps between the
+            // straddling samples as the window boundary slides across them —
+            // right edge pinned at x0+w gliding toward the newest sample, left
+            // edge pinned at x0 gliding away from the expiring one. When a
+            // boundary crosses a sample, that sample takes its natural
+            // interior position exactly where the edge point just was —
+            // continuous motion at render rate with no extra work.
+            int start = 0, end = n;
+            SKPoint? leftEdge = null, rightEdge = null;
+
+            // Right tail: lerp previous -> newest across the sample interval.
+            double gapR = (hist[n - 1].Item1 - hist[n - 2].Item1).TotalSeconds;
+            if (gapR > 0.05)
+            {
+                end = n - 1;
+                double frac = Math.Max(0, Math.Min(1, (now - hist[n - 1].Item1).TotalSeconds / gapR));
+                rightEdge = new SKPoint(x0 + w, MapY(hist[n - 2].Item2 + (hist[n - 1].Item2 - hist[n - 2].Item2) * frac));
+            }
+
+            // Left edge: the snapshot carries one pre-window "context" sample
+            // (see RollingHistory.Snapshot); lerp it -> first in-window sample
+            // at the exact window boundary so expiry never pops.
+            var winStart = now.AddSeconds(-winSec);
+            double gapL = (hist[1].Item1 - hist[0].Item1).TotalSeconds;
+            if (hist[0].Item1 < winStart && gapL > 0.05)
+            {
+                start = 1;
+                double frac = Math.Max(0, Math.Min(1, (winStart - hist[0].Item1).TotalSeconds / gapL));
+                leftEdge = new SKPoint(x0, MapY(hist[0].Item2 + (hist[1].Item2 - hist[0].Item2) * frac));
+            }
+
+            var pts = new SKPoint[(end - start) + (leftEdge.HasValue ? 1 : 0) + (rightEdge.HasValue ? 1 : 0)];
+            int j = 0;
+            if (leftEdge.HasValue) pts[j++] = leftEdge.Value;
+            for (int i = start; i < end; i++)
             {
                 double t01 = 1.0 + (hist[i].Item1 - now).TotalSeconds / winSec;
                 t01 = Math.Max(0, Math.Min(1, t01));
-                double norm = (hist[i].Item2 - v.SparkRange.Min) / range;
-                norm = Math.Max(0, Math.Min(1, norm));
-                pts[i] = new SKPoint(x0 + (float)t01 * w, y0 + h - (float)norm * h);
+                pts[j++] = new SKPoint(x0 + (float)t01 * w, MapY(hist[i].Item2));
             }
+            if (rightEdge.HasValue) pts[j++] = rightEdge.Value;
             return pts;
         }
 
@@ -839,6 +899,10 @@ public sealed partial class TileRenderer
             double tnorm = (v.SparkTypicalMax - v.SparkRange.Min) / range;
             tnorm = Math.Max(0, Math.Min(1, tnorm));
             float ty = y0 + h - (float)tnorm * h;
+            // Keep the dashes clear of the top text band (legend + axis label
+            // occupy ~y0..y0+12); nudge down when the reference sits near the top.
+            float tyMin = y0 + 14;
+            if (ty < tyMin && tyMin < y0 + h) ty = tyMin;
             using var dash = new SKPaint
             {
                 Color = _theme.TextSecondary.WithAlpha(90), // ~35% opacity
@@ -983,7 +1047,10 @@ public sealed partial class TileRenderer
     /// </summary>
     public PaneLayout? ComputePaneLayout(SKRect tile, SKRect client, TileVisual v)
     {
-        var pane = SettingsPaneRect(tile, client);
+        // CPU tiles don't need a units selector; shrink the pane to match.
+        bool hideUnits = v.Kind == TileKind.Cpu;
+        float unitsRowH = 4 + PaneAccentLabelH + PaneToggleH;
+        var pane = hideUnits ? SettingsPaneRect(tile, client, -unitsRowH) : SettingsPaneRect(tile, client);
         if (pane is null) return null;
         var p = pane.Value;
 
@@ -998,11 +1065,19 @@ public sealed partial class TileRenderer
             y += PaneToggleH;
         }
 
-        y += 4;
-        // Units segmented control (Auto / Bits / Bytes) between toggles and divider.
-        float unitLabelH = PaneAccentLabelH;
-        var unitSegs = SegmentRects(x, right, y + unitLabelH, PaneToggleH);
-        y += unitLabelH + PaneToggleH;
+        IReadOnlyList<SKRect> unitSegs;
+        if (!hideUnits)
+        {
+            y += 4;
+            // Units segmented control (Auto / Bits / Bytes) between toggles and divider.
+            float unitLabelH = PaneAccentLabelH;
+            unitSegs = SegmentRects(x, right, y + unitLabelH, PaneToggleH);
+            y += unitLabelH + PaneToggleH;
+        }
+        else
+        {
+            unitSegs = Array.Empty<SKRect>();
+        }
 
         y += 10; // divider gap
         y += PaneAccentLabelH;
@@ -1071,14 +1146,17 @@ public sealed partial class TileRenderer
         }
         y = layout.Toggles[^1].Bottom + 4;
 
-        // Units segmented control (Auto / Bits / Bytes).
-        using var unitLabelPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        var unitLabelFont = CachedFont("Segoe UI", 12);
-        canvas.DrawText("Units", x, y + 11, unitLabelFont, unitLabelPaint);
-        string[] unitLabels = { "Auto", "Bits", "Bytes" };
-        int unitIdx = (int)v.Settings.UnitMode;
-        DrawSegments(canvas, layout.UnitSegments, unitLabels, unitIdx, v.Accent);
-        y = layout.UnitSegments[^1].Bottom + 4;
+        if (layout.UnitSegments.Count > 0)
+        {
+            // Units segmented control (Auto / Bits / Bytes).
+            using var unitLabelPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
+            var unitLabelFont = CachedFont("Segoe UI", 12);
+            canvas.DrawText("Units", x, y + 11, unitLabelFont, unitLabelPaint);
+            string[] unitLabels = { "Auto", "Bits", "Bytes" };
+            int unitIdx = (int)v.Settings.UnitMode;
+            DrawSegments(canvas, layout.UnitSegments, unitLabels, unitIdx, v.Accent);
+            y = layout.UnitSegments[^1].Bottom + 4;
+        }
 
         using var div = new SKPaint { Color = _theme.TileBorder, Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
         canvas.DrawLine(x, y, right, y, div);
@@ -1214,7 +1292,18 @@ public sealed partial class TileRenderer
 
         // ---- right column ----
         float ry = p.Top + pad + 20;
-        var themeSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segRowH + toggleGap;
+
+        // Theme: 6 themes arranged in 2 rows of 3, since labels like "Transparent"
+        // and "Frost Light" need more horizontal space than a single row of 6 allows.
+        float themeRow1Y = ry + segLabelH + 4;
+        var themeRow1 = SegmentRects(rightX, rx, themeRow1Y, segH, 3);
+        float themeRow2Y = themeRow1Y + segH + 4;
+        var themeRow2 = SegmentRects(rightX, rx, themeRow2Y, segH, 3);
+        var themeSegs = new List<SKRect>(6);
+        themeSegs.AddRange(themeRow1);
+        themeSegs.AddRange(themeRow2);
+        ry += segLabelH + 4 + segH + 4 + segH + toggleGap;
+
         var graphSpanSegs = SegmentRects(rightX, rx, ry + segLabelH, segH, 4); ry += segRowH + toggleGap;
         var decimalsSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segRowH + toggleGap;
         float rightBottom = ry;
@@ -1305,7 +1394,7 @@ public sealed partial class TileRenderer
 
         // ---- right column: Theme segmented ----
         DrawRowLabel(canvas, layout.ThemeSegments[0].Left, layout.ThemeSegments[0].Top - segLabelH, segLabelH, "Theme");
-        string[] themeLabels = { "Midnight", "Obsidian", "Daybreak" };
+        string[] themeLabels = { "Midnight", "Obsidian", "Daybreak", "Transparent", "Frost Light", "Frost Dark" };
         int themeIdx = IndexOfTheme(currentTheme.Name);
         DrawSegments(canvas, layout.ThemeSegments, themeLabels, themeIdx, _theme.Accent);
 

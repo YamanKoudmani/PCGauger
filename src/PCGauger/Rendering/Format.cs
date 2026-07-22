@@ -38,12 +38,20 @@ public static class Format
         // Bits axis: convert bytes -> bits.
         double v = bits ? value * 8.0 : value;
         string[] units = bits
-            ? new[] { "bps", "Kbps", "Mbps", "Gbps", "Tbps" }
+            ? rate
+                ? new[] { "bps", "Kbps", "Mbps", "Gbps", "Tbps" }
+                : new[] { "b", "Kb", "Mb", "Gb", "Tb" }
             : new[] { "B", "KB", "MB", "GB", "TB" };
+        // Scaling: binary (1024) for byte quantities/rates and bit quantities —
+        // the Windows convention for RAM, VRAM and disk (matches Task Manager,
+        // Explorer, and this app's own 1024-based axis ladder). Decimal (1000)
+        // only for bit RATES, where networking convention is decimal (a 1 Gbps
+        // link is 10^9 bits/s).
+        double step = bits && rate ? 1000.0 : 1024.0;
         int i = 0;
-        while (v >= 1000 && i < units.Length - 1)
+        while (v >= step && i < units.Length - 1)
         {
-            v /= 1000;
+            v /= step;
             i++;
         }
         // Bits units already carry "ps" (per second); only the bytes axis needs

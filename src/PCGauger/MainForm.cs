@@ -207,6 +207,8 @@ public sealed class MainForm : Form
         Shown += (_, _) =>
         {
             ApplyWindowBounds();
+            // Ensure the accent policy is active now the handle is visible.
+            WindowComposition.Apply(Handle, _theme);
             // The form is visible and painted — dismiss the loading splash
             // (covers the single-file runtime extraction pause on first run).
             // The splash runs its own loop on the UI thread, so close it
@@ -1378,6 +1380,7 @@ public sealed class MainForm : Form
         _renderer.Theme = t;
         BackColor = Color.FromArgb(t.Background.Red, t.Background.Green, t.Background.Blue);
         _surface.BackColor = BackColor;
+        WindowComposition.Apply(Handle, t);
         foreach (var d in _detached) d.SetTheme(t);
         _surface.Invalidate();
     }
@@ -1468,6 +1471,7 @@ public sealed class MainForm : Form
     private const int HTTOPRIGHT = 14, HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
     private const int HTCAPTION = 2;
     private const int HTCLIENT = 1;
+    private const int WM_DWMCOMPOSITIONCHANGED = 0x031E;
 
     protected override void WndProc(ref Message m)
     {
@@ -1507,6 +1511,12 @@ public sealed class MainForm : Form
             if (_globalPaneOpen) { _globalPaneOpen = false; ClosePicker(); _surface.Invalidate(); }
         }
         if (m.Msg == WM_NCMOUSEMOVE) ClearHandleHover();
+        // Re-apply accent when DWM composition changes (e.g. after
+        // a theme toggle or user32 policy reset).
+        if (m.Msg == WM_DWMCOMPOSITIONCHANGED)
+        {
+            WindowComposition.Apply(Handle, _theme);
+        }
         base.WndProc(ref m);
     }
 
@@ -1516,8 +1526,15 @@ public sealed class MainForm : Form
         int w = e.Info.Width;
         int h = e.Info.Height;
 
-        var bg = _theme.BackgroundPaint(); // cached — do NOT dispose
-        canvas.DrawRect(0, 0, w, h, bg);
+        if (_theme.Backdrop == WindowBackdrop.Opaque)
+        {
+            var bg = _theme.BackgroundPaint(); // cached — do NOT dispose
+            canvas.DrawRect(0, 0, w, h, bg);
+        }
+        else
+        {
+            canvas.Clear(SKColors.Transparent);
+        }
 
         var rects = TileRects();
         for (int i = 0; i < _tiles.Count; i++)
@@ -1627,7 +1644,7 @@ public sealed class MainForm : Form
             fade.Shader = SKShader.CreateLinearGradient(
                 new SKPoint(fadeStart, bandTop),
                 new SKPoint(maxRight, bandTop),
-                new[] { _theme.FooterBand.WithAlpha(0), _theme.FooterBand.WithAlpha(255) },
+                new[] { _theme.FooterBand.WithAlpha(0), _theme.FooterBand },
                 new[] { 0f, 1f },
                 SKShaderTileMode.Clamp);
             canvas.DrawRect(fadeStart, bandTop, maxRight - fadeStart, FooterHeight, fade);
@@ -2168,6 +2185,9 @@ internal sealed class DetachedTileForm : Form
         _renderTimer = new System.Windows.Forms.Timer { Interval = 33 };
         _renderTimer.Tick += (_, _) => _surface.Invalidate();
         _renderTimer.Start();
+
+        // Apply accent policy once the window handle is visible.
+        Shown += (_, _) => WindowComposition.Apply(Handle, _theme);
     }
 
     public void SetTheme(Theme t)
@@ -2176,6 +2196,7 @@ internal sealed class DetachedTileForm : Form
         _renderer.Theme = t;
         BackColor = Color.FromArgb(t.Background.Red, t.Background.Green, t.Background.Blue);
         _surface.BackColor = BackColor;
+        WindowComposition.Apply(Handle, t);
         _surface.Invalidate();
     }
 
@@ -2221,6 +2242,7 @@ internal sealed class DetachedTileForm : Form
     private const int HTTOPRIGHT = 14, HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
     private const int HTCAPTION = 2;
     private const int HTCLIENT = 1;
+    private const int WM_DWMCOMPOSITIONCHANGED = 0x031E;
 
     protected override void WndProc(ref Message m)
     {
@@ -2259,6 +2281,10 @@ internal sealed class DetachedTileForm : Form
             _surface.Invalidate();
         }
         if (m.Msg == WM_NCMOUSEMOVE) ClearHandleHover();
+        if (m.Msg == WM_DWMCOMPOSITIONCHANGED)
+        {
+            WindowComposition.Apply(Handle, _theme);
+        }
         base.WndProc(ref m);
     }
 
@@ -2533,8 +2559,15 @@ internal sealed class DetachedTileForm : Form
         var canvas = e.Surface.Canvas;
         int w = e.Info.Width;
         int h = e.Info.Height;
-        using (var bg = _theme.BackgroundPaint())
-            canvas.DrawRect(0, 0, w, h, bg);
+        if (_theme.Backdrop == WindowBackdrop.Opaque)
+        {
+            using (var bg = _theme.BackgroundPaint())
+                canvas.DrawRect(0, 0, w, h, bg);
+        }
+        else
+        {
+            canvas.Clear(SKColors.Transparent);
+        }
         var rect = TileRect();
         var accent = TilePalette.Resolve(_tile.Kind, _tile.Settings);
         _tile.Draw(canvas, rect);

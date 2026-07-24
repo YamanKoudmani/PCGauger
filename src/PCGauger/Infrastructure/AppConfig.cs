@@ -42,7 +42,7 @@ public sealed class TileConfig
         s.ShowSecondaryLine = ShowSecondaryLine;
         s.UnitMode = UnitMode;
         s.AccentColor = AccentArgb.HasValue
-            ? new SKColor((byte)(AccentArgb.Value >> 24), (byte)(AccentArgb.Value >> 16), (byte)(AccentArgb.Value >> 8), (byte)AccentArgb.Value)
+            ? new SKColor((byte)(AccentArgb.Value >> 16), (byte)(AccentArgb.Value >> 8), (byte)AccentArgb.Value, (byte)(AccentArgb.Value >> 24))
             : null;
     }
 
@@ -73,6 +73,10 @@ public sealed class AppConfig
     private static readonly string DirectoryPath =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PCGauger");
     private static readonly string FilePath = Path.Combine(DirectoryPath, "config.json");
+
+    /// <summary>True on first launch (no prior config file). Set to false after
+    /// the welcome screen completes so it never shows again.</summary>
+    public bool IsFirstRun { get; set; } = true;
 
     public string ThemeName { get; set; } = "Frost Dark";
     public bool LaunchAtStartup { get; set; }

@@ -1,4 +1,5 @@
 using System.Windows.Forms;
+using PCGauger.Infrastructure;
 
 namespace PCGauger;
 
@@ -16,6 +17,19 @@ internal static class Program
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             Fatal(e.ExceptionObject as Exception ?? new Exception("Unknown fatal error"));
 
+        // Load config early so the welcome screen can gate first-run setup.
+        var config = AppConfig.Load();
+
+        // Show the welcome dialog on first launch. It lets the user configure
+        // key preferences (launch at startup, always on top) before the
+        // dashboard appears. After "Get Started", IsFirstRun is set to false.
+        if (config.IsFirstRun)
+        {
+            using (var welcome = new WelcomeForm(config))
+            {
+                welcome.ShowDialog();
+            }
+        }
 
         // Show the loading splash on the UI thread. The main form is built
         // DIRECTLY on the UI thread (no worker Task.Run) so WinForms/SkiaSharp

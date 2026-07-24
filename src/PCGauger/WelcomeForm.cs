@@ -19,14 +19,22 @@ public sealed class WelcomeForm : Form
     private static readonly Color TextPrimary = Color.FromArgb(0xF2, 0xF5, 0xF8);
     private static readonly Color TextSecondary = Color.FromArgb(0x8B, 0x95, 0xA3);
     private static readonly Color Accent = Color.FromArgb(0x4C, 0x9A, 0xFF);
+    private static readonly Color AccentHover = Color.FromArgb(0x6B, 0xAC, 0xFF);
+    private static readonly Color RowHover = Color.FromArgb(0x1C, 0x1F, 0x27);
 
     private bool _launchAtStartup;
     private bool _alwaysOnTop;
 
-    // Layout rects (computed in OnResize).
+    // Layout (computed in ComputeLayout from real font metrics so text can
+    // never overlap, regardless of DPI scaling).
     private Rectangle _launchToggleRect;
     private Rectangle _alwaysOnTopRect;
     private Rectangle _buttonRect;
+    private int _titleY;
+    private int _subtitleY;
+    private int _dividerY;
+    private int _rowLabelOffsetY;
+    private int _rowDescOffsetY;
 
     // Hover state.
     private bool _hoverLaunch;
@@ -42,7 +50,7 @@ public sealed class WelcomeForm : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = BackgroundColor;
-        Size = new Size(380, 340);
+        Size = new Size(520, 378);
         MinimumSize = Size;
         MaximumSize = Size;
         DoubleBuffered = true;
@@ -62,16 +70,32 @@ public sealed class WelcomeForm : Form
 
     private void ComputeLayout()
     {
-        int pad = 28;
+        int pad = 36;
         int contentX = pad;
         int contentW = ClientSize.Width - pad * 2;
 
-        int toggleY = 130;
-        int toggleH = 36;
-        int toggleGap = 12;
+        // Stack every element from real font line heights. Hardcoding offsets
+        // alongside point-sized fonts caused overlapping/clipped text (and would
+        // get worse under DPI scaling, where point fonts grow but pixels don't).
+        using var titleFont = new Font("Segoe UI Semibold", 20f);
+        using var subFont = new Font("Segoe UI", 12f);
+        using var labelFont = new Font("Segoe UI", 13f);
+        using var descFont = new Font("Segoe UI", 11f);
 
-        _launchToggleRect = new Rectangle(contentX, toggleY, contentW, toggleH);
-        _alwaysOnTopRect = new Rectangle(contentX, toggleY + toggleH + toggleGap, contentW, toggleH);
+        _titleY = 30;
+        _subtitleY = _titleY + titleFont.Height + 4;
+        _dividerY = _subtitleY + subFont.Height + 14;
+
+        // Each toggle row fits label + description plus breathing room.
+        const int rowPadV = 8;
+        _rowLabelOffsetY = rowPadV;
+        _rowDescOffsetY = rowPadV + labelFont.Height + 2;
+        int rowH = _rowDescOffsetY + descFont.Height + rowPadV;
+        const int rowGap = 8;
+
+        int rowY = _dividerY + 18;
+        _launchToggleRect = new Rectangle(contentX, rowY, contentW, rowH);
+        _alwaysOnTopRect = new Rectangle(contentX, rowY + rowH + rowGap, contentW, rowH);
 
         int btnW = 160;
         int btnH = 40;
@@ -84,16 +108,20 @@ public sealed class WelcomeForm : Form
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        bool changed = false;
         bool newLaunch = _launchToggleRect.Contains(e.Location);
         bool newAlwaysOnTop = _alwaysOnTopRect.Contains(e.Location);
         bool newButton = _buttonRect.Contains(e.Location);
-        if (_hoverLaunch != newLaunch) { _hoverLaunch = newLaunch; changed = true; }
-        if (_hoverAlwaysOnTop != newAlwaysOnTop) { _hoverAlwaysOnTop = newAlwaysOnTop; changed = true; }
-        if (_hoverButton != newButton) { _hoverButton = newButton; changed = true; }
-        if (changed)
+
+        // Hand only while actually over something clickable (previously the
+        // cursor was set to Hand on any hover-state *change*, so it stuck
+        // everywhere after the first hover).
+        Cursor = (newLaunch || newAlwaysOnTop || newButton) ? Cursors.Hand : Cursors.Default;
+
+        if (_hoverLaunch != newLaunch || _hoverAlwaysOnTop != newAlwaysOnTop || _hoverButton != newButton)
         {
-            Cursor = Cursors.Hand;
+            _hoverLaunch = newLaunch;
+            _hoverAlwaysOnTop = newAlwaysOnTop;
+            _hoverButton = newButton;
             Invalidate();
         }
     }
@@ -147,26 +175,26 @@ public sealed class WelcomeForm : Form
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
 
-        int pad = 28;
+        int pad = 36;
 
         // Title.
-        using (var titleFont = new Font("Segoe UI Semibold", 22f))
+        using (var titleFont = new Font("Segoe UI Semibold", 20f))
         using (var titleBrush = new SolidBrush(Accent))
         {
-            g.DrawString("Welcome to PCGauger", titleFont, titleBrush, pad, 30);
+            g.DrawString("Welcome to PCGauger", titleFont, titleBrush, pad, _titleY);
         }
 
         // Subtitle.
-        using (var subFont = new Font("Segoe UI", 13f))
+        using (var subFont = new Font("Segoe UI", 12f))
         using (var subBrush = new SolidBrush(TextSecondary))
         {
-            g.DrawString("A lightweight hardware monitoring dashboard.", subFont, subBrush, pad, 66);
+            g.DrawString("A lightweight hardware monitoring dashboard.", subFont, subBrush, pad, _subtitleY);
         }
 
         // Divider.
         using (var divPen = new Pen(BorderColor, 1f))
         {
-            g.DrawLine(divPen, pad, 100, ClientSize.Width - pad, 100);
+            g.DrawLine(divPen, pad, _dividerY, ClientSize.Width - pad, _dividerY);
         }
 
         // Toggle rows.
@@ -184,34 +212,44 @@ public sealed class WelcomeForm : Form
 
     private void DrawToggleRow(Graphics g, Rectangle rect, string label, string description, bool on, bool hover)
     {
-        // Subtle background highlight on hover.
+        // Reserve space for the switch on the right.
+        int sw = 34, sh = 18;
+        int switchMargin = 4;
+
+        // Subtle background highlight on hover. Inflated a little past the
+        // text column so the text keeps its left alignment with the header.
         if (hover)
         {
-            using (var bgBrush = new SolidBrush(Color.FromArgb(0x0A, 0x0A, 0x0C)))
-            using (var bgPath = RoundedRect(rect.X, rect.Y, rect.Width, rect.Height, 8))
+            using (var bgBrush = new SolidBrush(RowHover))
+            using (var bgPath = RoundedRect(rect.X - 8, rect.Y, rect.Width + 16, rect.Height, 8))
             {
                 g.FillPath(bgBrush, bgPath);
             }
         }
 
+        // Switch position (right-aligned, centered against the whole row), so
+        // text width can be clamped to never run underneath it.
+        int sx = rect.Right - sw - switchMargin;
+        int sy = rect.Y + rect.Height / 2 - sh / 2;
+        int textMaxW = sx - 12 - rect.X;
+
         // Label.
         using (var labelFont = new Font("Segoe UI", 13f))
         using (var labelBrush = new SolidBrush(TextPrimary))
+        using (var format = new StringFormat { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter })
         {
-            g.DrawString(label, labelFont, labelBrush, rect.X, rect.Y + 4);
+            g.DrawString(label, labelFont, labelBrush,
+                new RectangleF(rect.X, rect.Y + _rowLabelOffsetY, textMaxW, labelFont.Height), format);
         }
 
         // Description.
         using (var descFont = new Font("Segoe UI", 11f))
         using (var descBrush = new SolidBrush(TextSecondary))
+        using (var format = new StringFormat { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter })
         {
-            g.DrawString(description, descFont, descBrush, rect.X, rect.Y + 22);
+            g.DrawString(description, descFont, descBrush,
+                new RectangleF(rect.X, rect.Y + _rowDescOffsetY, textMaxW, descFont.Height), format);
         }
-
-        // Switch (right-aligned).
-        int sw = 34, sh = 18;
-        int sx = rect.Right - sw - 4;
-        int sy = rect.Y + rect.Height / 2 - sh / 2;
 
         // Track.
         using (var trackPath = RoundedRect(sx, sy, sw, sh, sh / 2))
@@ -239,7 +277,7 @@ public sealed class WelcomeForm : Form
         int radius = 10;
 
         using (var path = RoundedRect(r.X, r.Y, r.Width, r.Height, radius))
-        using (var brush = new SolidBrush(Accent))
+        using (var brush = new SolidBrush(_hoverButton ? AccentHover : Accent))
         {
             g.FillPath(brush, path);
         }

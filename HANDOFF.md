@@ -2,7 +2,7 @@
 
 > Context for the next working session: what this project is, how to build/release
 > it, the owner's preferences, architecture notes, and gotchas learned the hard way.
-> Last updated at **v2.5.0** (commit `0949fe2`).
+> Last updated at **v2.8.0**.
 
 ---
 
@@ -12,6 +12,8 @@
 for **CPU / RAM / GPU / Disk / NET**, with:
 - Multi-instance device support (multiple GPUs / disks / NICs, per-tile device picker).
 - Per-tile settings (toggles for Title / Usage % / Bar / Graph / Details, units, accent color).
+- GPU core temperature in the GPU details line (NVAPI for NVIDIA, ADL2 for AMD; hidden when unavailable).
+- Welcome screen on first run.
 - Detachable tiles (a tile can pop out into its own window).
 - Global settings pane (launch-at-startup, kiosk mode, always-on-top, threshold alert, theme, graph span, decimals).
 - Footer "Top process" status bar (top CPU / RAM / GPU / Disk consumer).
@@ -23,7 +25,7 @@ for **CPU / RAM / GPU / Disk / NET**, with:
 - **SkiaSharp** `HitTestSurface : SKControl` (software/GDI+ rendering, `SkiaSharp.Views.WindowsForms` 3.119.0).
 - **Win32 / PDH P/Invoke** for CPU/disk/perf counters, **DXGI COM interop** for GPU
   (vtable delegates in `DxgiFactory.cs`), **`System.Net.NetworkInformation`** for NET.
-- Single project: `src/PCGauger/PCGauger.csproj`. **Current version: `2.5.0`** (`<Version>` in csproj).
+- Single project: `src/PCGauger/PCGauger.csproj`. **Current version: `2.8.0`** (`<Version>` in csproj).
 
 ## 3. Repo & tooling
 
@@ -80,7 +82,9 @@ build single-file → zip → `gh release create` → `gh release upload` → ve
   (bounded 3s) the in-flight update so rebind-time `Dispose` is safe; `Start()` uses the timer
   only (the old `Task.Run(Tick)` + `TimeSpan.Zero` double-fire is gone).
 - `Metrics/Providers/` — `CpuProvider` (GetSystemTimes + NtQuerySystemInformation + PDH clock),
-  `MemoryProvider`, `GpuProvider` (DXGI + PDH GPU Engine; deferred resolve with **retry-backoff**),
+   `MemoryProvider`, `GpuProvider` (DXGI + PDH GPU Engine; deferred resolve with **retry-backoff**;
+   core temp via `NvapiInterop`/`AdlxInterop`; utilization clamped at 100 — summed PDH engine
+   counters can exceed it on multi-engine GPUs),
   `StorageProvider` (PDH LogicalDisk; **lazy PDH-driven presence** — no per-poll `DriveInfo.IsReady`),
   `NetworkProvider` (managed `NetworkInterface`; re-selects each poll), `TopProcessProvider`
   (process enumeration + PerformanceCounter — the expensive one, now isolated by the poller).
@@ -91,8 +95,12 @@ build single-file → zip → `gh release create` → `gh release upload` → ve
   `DrawBigValue`/`DrawBigValueLiteral` (scaled headline via `BigValueFontSize`, 46px→26px floor),
   `DrawBar`, `DrawTextFaded` (fade-truncate helper), axis-hysteresis (`NextAxisMax`/`NiceCeiling`).
 - `TileVisual.Finish` — **flow-based** details+graph placement with a vertical budget
-  (graph floor 40px, details line 18px + 6px gaps). Graph hides below floor, details hides when
+  (graph floor 56px, details line 18px + 6px gaps). Graph hides below floor, details hides when
   it can't fit; details outlives the graph on a shrinking tile.
+- `DrawSparklinePath` — 16px **top band** reserved for the axis-max label (+ dual-graph legend);
+  the curve ceiling maps just UNDER it so values never poke above the label. The **dashed line is
+  the alert threshold** (percent graphs only, alert-red @ ~43% alpha, hidden when alerts are off
+  or the threshold is off the current axis). Axis hysteresis: `NextAxisMax`/`NiceCeiling`.
 - `Rendering/TileRenderer.Devices.cs` — settings pane, device dropdown, global pane, unavailable-tile state.
 - `Rendering/GridLayout.cs` (`Tile` model + grid math), `TileSettings.cs`, `Theme.cs`, `TilePalette`.
 - `MainForm.cs` — startup (providers constructed **deferred**, pollers started, `BeginResolve`),
@@ -106,6 +114,12 @@ build single-file → zip → `gh release create` → `gh release upload` → ve
 - **v2.1.2** — MetricPoller per-provider async rewrite (**startup freeze fix**), GPU resolve retry, lazy disk presence.
 - **v2.5.0 (Maturity Release)** — responsive tile layout (flow-based Finish, graph/details degradation,
   headline scaling, inline subtitle, fade truncation) + footer status-bar clip fix.
+- **v2.7.0** — glass themes (Transparent, Frost Light/Dark), judder-free graph edges, units + core-count fixes.
+- **v2.7.1** — opaque tiles in Transparent theme.
+- **v2.7.2 / v2.7.3** — first-run Welcome screen + layout polish.
+- **v2.8.0 (Clarity Release)** — GPU core temperature (NVAPI/ADL), settings-pane polish (section dividers,
+  Back/Done buttons, footer tooltips, close confirmation), accent-color byte-order fix, sparkline top band
+  (label/curve separation), dashed line repurposed to the alert threshold.
 
 ## 8. Gotchas (read before you start)
 
@@ -118,7 +132,7 @@ build single-file → zip → `gh release create` → `gh release upload` → ve
 - **Single-file EXE + Windows Defender:** a *browser-downloaded* single-file exe can stall ~1 min
   on launch (MotW scan). Locally-run copies are fine. This is why we briefly tried multi-file —
   owner prefers single-file anyway.
-- **Pre-existing warning** `CS8601` at `MainForm.cs:295` — unrelated to recent work, leave it.
+- **Pre-existing warning** `CS8601` at `MainForm.cs:298` (line drifts) — unrelated to recent work, leave it.
 - `git push` prints a benign `RemoteException` banner in PowerShell (stderr redirect of the
   `To https://...` line) — the push still succeeds; check for `master -> master`.
 - Detached-tile windows have their own renderer instance; axis-hysteresis state is per-renderer.

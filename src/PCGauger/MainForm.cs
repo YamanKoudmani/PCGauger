@@ -360,8 +360,9 @@ public sealed class MainForm : Form
         double util = MetricValue(snap, "gpu.util");
         SampleHistory(rt, _poller, util);
         _renderer.SetGpuHistory(rt.HistA.DecimatedSnapshot(256), rt.HistA.Window);
+        var gpu = (GpuProvider)rt.Provider;
         _renderer.DrawGpuTile(c, r, tile.Settings, TilePalette.Resolve(tile.Kind, tile.Settings),
-            util, ((GpuProvider)rt.Provider).VramUsed, ((GpuProvider)rt.Provider).VramBudget,
+            util, gpu.VramUsed, gpu.VramBudget, gpu.TemperatureCelsius,
             deviceSubtitle: tile.IsDeviceSelectable ? tile.DeviceDisplayName : null, axisKey: tile.ConfigKey);
     }
     private void DrawDisk(SKCanvas c, SKRect r, Tile tile)
@@ -1650,9 +1651,20 @@ public sealed class MainForm : Form
             canvas.DrawRect(fadeStart, bandTop, maxRight - fadeStart, FooterHeight, fade);
         }
 
+        // Vertical separator between gear and close buttons.
+        float sepX = (FooterGearRect().Right + FooterCloseRect().Left) / 2;
+        using var sepPaint = new SKPaint { Color = _theme.TileBorder, Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
+        canvas.DrawLine(sepX, bandTop + 6, sepX, bandTop + FooterHeight - 6, sepPaint);
+
         // Footer gear at far right.
         _renderer.DrawGearAt(canvas, FooterGearRect(), _hoverFooterGear, _theme.Accent);
         _renderer.DrawCloseAt(canvas, FooterCloseRect(), _hoverFooterClose);
+
+        // Hover tooltips above footer buttons (clamped to the canvas width).
+        if (_hoverFooterGear)
+            _renderer.DrawTooltip(canvas, "Settings", FooterGearRect().MidX, FooterGearRect().Top, w);
+        if (_hoverFooterClose)
+            _renderer.DrawTooltip(canvas, "Exit PCGauger", FooterCloseRect().MidX, FooterCloseRect().Top, w);
     }
 
     /// <summary>Recomposes + measures the footer segments (labels, fitted values,
@@ -1754,8 +1766,25 @@ public sealed class MainForm : Form
         catch { /* registry access can fail; ignore */ }
     }
 
+    private bool _closingConfirmed;
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        if ((_openPaneTile != null || _globalPaneOpen) && !_closingConfirmed)
+        {
+            var result = MessageBox.Show(this,
+                "Settings are still open. Are you sure you want to exit PCGauger?",
+                "Confirm exit",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (result != DialogResult.Yes)
+            {
+                e.Cancel = true;
+                return;
+            }
+            _closingConfirmed = true;
+        }
+
         if (!_config.KioskMode) _floatingBounds = Bounds;
         _config.WindowX = _floatingBounds.X;
         _config.WindowY = _floatingBounds.Y;

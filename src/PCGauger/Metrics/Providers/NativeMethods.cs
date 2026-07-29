@@ -197,4 +197,15 @@ internal static class NativeMethods
 
     public static ulong FileTimeToUlong(FILETIME ft)
         => ((ulong)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+
+    // ---- Dynamic DLL loading (NVAPI / ADLX) ----
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi, BestFitMapping = false)]
+    public static extern IntPtr LoadLibrary(string lpFileName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool FreeLibrary(IntPtr hModule);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi, BestFitMapping = false)]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
 }

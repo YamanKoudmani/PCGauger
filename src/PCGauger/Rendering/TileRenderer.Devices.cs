@@ -213,7 +213,7 @@ public sealed partial class TileRenderer
         // --- Remove tile button (bottom, separated) ---
         var remove = new SKRect(x, y, right, y + PaneRemoveH);
 
-        var close = new SKRect(p.Right - 28, p.Top + 6, p.Right - 8, p.Top + 26);
+        var close = new SKRect(p.Right - 82, p.Top + 6, p.Right - PanePad, p.Top + 26);
 
         return new PaneLayout
         {
@@ -263,7 +263,7 @@ public sealed partial class TileRenderer
         canvas.DrawText("Customize", x, y + 12, headerFont, headerPaint);
         y += PaneHeaderGap;
 
-        DrawCloseGlyph(canvas, layout.Close, hoverClose);
+        DrawBackButton(canvas, layout.Close, hoverClose, v.Accent);
 
         // --- Device row ---
         DrawDeviceRow(canvas, layout.DeviceRow, tileData, hoverDeviceRow, v.Accent, deviceState?.DropdownOpen ?? false);
@@ -541,7 +541,7 @@ public sealed partial class TileRenderer
         float leftW = (rx - lx - colGap) / 2;
         float rightX = lx + leftW + colGap;
 
-        var close = new SKRect(p.Right - 30, p.Top + 8, p.Right - 8, p.Top + 30);
+        var close = new SKRect(p.Right - 74, p.Top + 8, p.Right - GlobalPanePad, p.Top + 30);
 
         // Scale row heights / spacing with the available body height so the
         // layout breathes on large panes and compresses on small ones. Text
@@ -617,6 +617,8 @@ public sealed partial class TileRenderer
             addButtons.Add(new SKRect(rx - PaneAddBtnW * scale, rowY + 2 * scale, rx, rowY + addRowH - 2 * scale));
             rowY += addRowH + 4 * scale;
         }
+        // Space for the version label below the last add row.
+        rowY += 16 * scale;
 
         // ---- Picker (lays out INSIDE the pane; previously it could spill past
         // the pane bottom, which caused a real click bug). It is positioned just
@@ -739,9 +741,9 @@ public sealed partial class TileRenderer
         float rx = p.Right - pad;
 
         using var headerPaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        var headerFont = TileRenderer.CachedFont("Segoe UI Semibold", 15);
-        canvas.DrawText("Settings", lx, p.Top + pad + 14, headerFont, headerPaint);
-        DrawCloseGlyph(canvas, layout.Close, hoverClose);
+        var headerFont = TileRenderer.CachedFont("Segoe UI Semibold", 18);
+        canvas.DrawText("Settings", lx, p.Top + pad + 16, headerFont, headerPaint);
+        DrawDoneButton(canvas, layout.Close, hoverClose, _theme.Accent);
 
         // Recover the same scale the layout pass used, so label baselines line
         // up with the (scaled) control rects.
@@ -749,13 +751,19 @@ public sealed partial class TileRenderer
         float scale = Math.Clamp(bodyH / GlobalPaneNominalBodyH, GlobalPaneMinScale, GlobalPaneMaxScale);
         float rowH = 30 * scale;
         float segLabelH = 16;
+        float leftW = layout.LaunchToggle.Width;
 
+        // ── General ────────────────────────────────────────────
+        DrawSectionDivider(canvas, lx, layout.LaunchToggle.Top - 4, "GENERAL");
         DrawRowLabel(canvas, layout.LaunchToggle.Left, layout.LaunchToggle.Top, rowH, "Launch at startup");
         DrawSwitch(canvas, layout.LaunchToggle, config.LaunchAtStartup, _theme.Accent);
         DrawRowLabel(canvas, layout.KioskToggle.Left, layout.KioskToggle.Top, rowH, "Kiosk mode");
         DrawSwitch(canvas, layout.KioskToggle, config.KioskMode, _theme.Accent);
         DrawRowLabel(canvas, layout.AlwaysOnTopToggle.Left, layout.AlwaysOnTopToggle.Top, rowH, "Always on top");
         DrawSwitch(canvas, layout.AlwaysOnTopToggle, config.AlwaysOnTop, _theme.Accent);
+
+        // ── Alerts ─────────────────────────────────────────────
+        DrawSectionDivider(canvas, lx, layout.ThresholdToggle.Top - 4, "ALERTS");
         DrawRowLabel(canvas, layout.ThresholdToggle.Left, layout.ThresholdToggle.Top, rowH, "Threshold alert");
         DrawSwitch(canvas, layout.ThresholdToggle, config.ThresholdEnabled, _theme.Accent);
 
@@ -763,6 +771,9 @@ public sealed partial class TileRenderer
         DrawStepper(canvas, layout.ThresholdMinus, layout.ThresholdValue, layout.ThresholdPlus,
             $"{config.ThresholdPercent:0}%", _theme.Accent);
 
+        // ── Display ────────────────────────────────────────────
+        float displayX = layout.ThemeSegments[0].Left;
+        DrawSectionDivider(canvas, displayX, layout.ThemeSegments[0].Top - segLabelH - 2, "DISPLAY");
         DrawRowLabel(canvas, layout.ThemeSegments[0].Left, layout.ThemeSegments[0].Top - segLabelH, segLabelH, "Theme");
         string[] themeLabels = { "Midnight", "Obsidian", "Daybreak", "Transparent", "Frost Light", "Frost Dark" };
         int themeIdx = IndexOfTheme(currentTheme.Name);
@@ -777,11 +788,8 @@ public sealed partial class TileRenderer
         string[] decLabels = { "0", "1", "2" };
         DrawSegments(canvas, layout.DecimalsSegments, decLabels, config.ValueDecimals, _theme.Accent);
 
-        // ---- Tiles section header ----
-        using var secPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        var secFont = TileRenderer.CachedFont("Segoe UI Semibold", 12);
-        float tilesHeaderY = layout.TileChips[0].Top - 4 - 13;
-        canvas.DrawText("Tiles", lx, tilesHeaderY + 13, secFont, secPaint);
+        // ── Tiles ──────────────────────────────────────────────
+        DrawSectionDivider(canvas, lx, layout.TileChips[0].Top - 4, "TILES");
 
         // CPU + RAM toggle chips.
         DrawChip(canvas, layout.TileChips[0], TileKind.Cpu, config.Tile(TileKind.Cpu).Enabled);
@@ -826,7 +834,7 @@ public sealed partial class TileRenderer
         string full = $"{label} · {count}";
         canvas.DrawText(full, row.Left, row.MidY + 5, labelFont, labelPaint);
 
-        // "Add" button (right-aligned). The plus is a DRAWN vector cross
+        // "Add +" button (right-aligned). The plus is a drawn vector cross
         // (matching the hand-drawn glyphs elsewhere in this file) — the
         // fullwidth plus U+FF0B renders as tofu (a square) in Segoe UI.
         using var rr = new SKRoundRect(btn, 8);
@@ -839,9 +847,10 @@ public sealed partial class TileRenderer
         float gap = 4;
         const string addTxt = "Add";
         float tw = tf.MeasureText(addTxt);
-        float totalW = plus + gap + tw;
+        float totalW = tw + gap + plus;
         float startX = btn.MidX - totalW / 2;
-        float plusCx = startX + plus / 2;
+        canvas.DrawText(addTxt, startX, btn.MidY + 4, tf, tp);
+        float plusCx = startX + tw + gap + plus / 2;
         float plusCy = btn.MidY;
         using var plusP = new SKPaint
         {
@@ -853,7 +862,6 @@ public sealed partial class TileRenderer
         };
         canvas.DrawLine(plusCx - plus / 2, plusCy, plusCx + plus / 2, plusCy, plusP);
         canvas.DrawLine(plusCx, plusCy - plus / 2, plusCx, plusCy + plus / 2, plusP);
-        canvas.DrawText(addTxt, startX + plus + gap, btn.MidY + 4, tf, tp);
     }
 
     private void DrawPicker(SKCanvas canvas, GlobalPaneLayout layout, GlobalPaneDeviceState state, SKColor accent, int hoverItem)

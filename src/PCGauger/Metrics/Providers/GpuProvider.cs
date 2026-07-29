@@ -30,6 +30,12 @@ public sealed class GpuProvider : IMetricProvider, IAsyncResolvable
 {
     private readonly int _adapterIndex;
     private string? _luidFragment; // "luid_0x{High:X8}_0x{Low:X8}" to match PDH instances
+    private DxgiFactory.LUID _luid; // raw LUID for NVAPI/ADLX temperature lookup
+    private uint _vendorId;
+    private static NvapiInterop? _nvapi;
+    private static AdlxInterop? _adlxTemp;
+    private static bool _tempInited;
+    private static readonly object _tempLock = new();
 
     // Cap on the whole adapter-resolution unit (Create + Enum + GetDesc1) done
     // in the ctor. Keeps construction bounded even if every native step stalls.
@@ -67,6 +73,7 @@ public sealed class GpuProvider : IMetricProvider, IAsyncResolvable
     /// May be populated asynchronously if the ctor's resolution timed out.
     /// </summary>
     public string AdapterName { get; private set; }
+    public float? TemperatureCelsius { get; private set; }
 
     /// <summary>
     /// True while the requested adapter index resolves to a real adapter. False
@@ -164,6 +171,8 @@ public sealed class GpuProvider : IMetricProvider, IAsyncResolvable
                 if (adapter == null) return (string.Empty, (string?)null, false);
                 var desc = adapter.GetDesc1();
                 if (!desc.HasValue) return (string.Empty, (string?)null, false);
+                _luid = desc.Value.Luid;
+                _vendorId = desc.Value.VendorId;
                 string name = desc.Value.Description ?? string.Empty;
                 string frag = $"luid_0x{desc.Value.Luid.HighPart:X8}_0x{desc.Value.Luid.LowPart:X8}";
                 // A zero LUID means a virtual/software adapter with no real
@@ -295,6 +304,30 @@ public sealed class GpuProvider : IMetricProvider, IAsyncResolvable
         }
 
         QueryVram();
+
+        // GPU core temperature via vendor API (NVAPI for NVIDIA, ADL for AMD).
+        if (DeviceAvailable)
+        {
+            if (!_tempInited) InitTempApi();
+            if (_vendorId == 0x10DE && _nvapi != null)
+                TemperatureCelsius = _nvapi.GetGpuCoreTemp(_luid);
+            else if (_vendorId == 0x1002 && _adlxTemp != null)
+                TemperatureCelsius = _adlxTemp.GetGpuCoreTemp(_luid);
+            else
+                TemperatureCelsius = null;
+        }
+    }
+
+    private static void InitTempApi()
+    {
+        lock (_tempLock)
+        {
+            if (_tempInited) return;
+            _tempInited = true;
+            _nvapi = NvapiInterop.TryLoad();
+            if (_nvapi == null)
+                _adlxTemp = AdlxInterop.TryLoad();
+        }
     }
 
     /// <summary>
@@ -450,6 +483,8 @@ public sealed class GpuProvider : IMetricProvider, IAsyncResolvable
         yield return Metric.Gauge("gpu.util", "GPU", _utilization, "%");
         yield return Metric.Text("gpu.vram.used", "VRAM Used", _vramUsed, "B");
         yield return Metric.Text("gpu.vram.budget", "VRAM Total", _vramBudget, "B");
+        if (TemperatureCelsius.HasValue)
+            yield return Metric.Text("gpu.temp", "GPU Temp", TemperatureCelsius.Value, "°C");
     }
 
     public double Utilization => _utilization;

@@ -76,7 +76,7 @@ public sealed class Theme
         new SKColor(0x1E, 0x3A, 0x66), // accent soft
         new SKColor(0x5C, 0xB8, 0x5C), // sparkline
         new SKColor(0x14, 0x18, 0x20), // footer band
-        new SKColor(0x1C, 0x22, 0x2C)); // pane bg
+        new SKColor(0x1C, 0x1E, 0x22)); // pane bg — neutral dark, less blue cast
 
     /// <summary>OLED true-black dark variant — pure black background for panels.</summary>
     public static readonly Theme Obsidian = new(
@@ -90,7 +90,7 @@ public sealed class Theme
         new SKColor(0x16, 0x2C, 0x4A), // accent soft
         new SKColor(0x57, 0xC8, 0x7A), // sparkline
         new SKColor(0x0A, 0x0C, 0x0F), // footer band
-        new SKColor(0x16, 0x19, 0x1F)); // pane bg
+        new SKColor(0x16, 0x17, 0x1A)); // pane bg — neutral dark, less blue cast
 
     /// <summary>Legible light theme for bright rooms / daytime use.</summary>
     public static readonly Theme Daybreak = new(
@@ -122,7 +122,7 @@ public sealed class Theme
         new SKColor(0x1E, 0x3A, 0x66, 0x80), // accent soft — translucent (inside opaque cards)
         new SKColor(0x5C, 0xB8, 0x5C),       // sparkline
         new SKColor(0x14, 0x18, 0x20),       // footer band — opaque dark
-        new SKColor(0x1C, 0x22, 0x2C),       // pane bg — opaque dark
+        new SKColor(0x1C, 0x1E, 0x22),       // pane bg — opaque dark, less blue cast
         WindowBackdrop.Transparent);
 
     /// <summary>
@@ -158,7 +158,7 @@ public sealed class Theme
         new SKColor(0x1E, 0x3A, 0x66, 0x80), // accent soft — translucent
         new SKColor(0x5C, 0xB8, 0x5C),       // sparkline
         new SKColor(0x14, 0x18, 0x20, 0xA0), // footer band — translucent dark (alpha ~160)
-        new SKColor(0x1C, 0x22, 0x2C, 0xE6), // pane bg — near-opaque dark (alpha ~230)
+        new SKColor(0x1C, 0x1E, 0x22),       // pane bg — opaque dark, less blue cast
         WindowBackdrop.Frosted);
 
     public static IReadOnlyList<Theme> All { get; } = new[] { Midnight, Obsidian, Daybreak, Transparent, FrostLight, FrostDark };

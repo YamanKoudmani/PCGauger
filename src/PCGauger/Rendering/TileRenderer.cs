@@ -165,7 +165,7 @@ public sealed partial class TileRenderer
         _gpuWindowSeconds = window.TotalSeconds;
     }
 
-    public void DrawGpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double utilPct, ulong vramUsed, ulong vramBudget, string? deviceSubtitle = null, string? axisKey = null)
+    public void DrawGpuTile(SKCanvas canvas, SKRect rect, TileSettings s, SKColor accent, double utilPct, ulong vramUsed, ulong vramBudget, double? tempCelsius, string? deviceSubtitle = null, string? axisKey = null)
     {
         bool alert = ThresholdEnabled && utilPct >= ThresholdPercent;
         var v = new TileVisual(TileKind.Gpu, s, accent, _theme, alert) { Rect = rect, Y = rect.Top + TilePad, SparkWindowSeconds = _gpuWindowSeconds, AxisKey = axisKey ?? nameof(TileKind.Gpu) };
@@ -177,7 +177,10 @@ public sealed partial class TileRenderer
         string vram = vramBudget > 0
             ? $"{Format.Size(vramUsed, s.UnitMode, TileKind.Gpu)} / {Format.Size(vramBudget, s.UnitMode, TileKind.Gpu)}"
             : Format.Size(vramUsed, s.UnitMode, TileKind.Gpu);
-        DrawSecondary(canvas, v, vram);
+        string details = tempCelsius.HasValue
+            ? $"{vram}   ·   {tempCelsius.Value:F0}°C"
+            : vram;
+        DrawSecondary(canvas, v, details);
         v.Finish(canvas, this);
     }
 
@@ -433,25 +436,24 @@ public sealed partial class TileRenderer
     public void DrawGear(SKCanvas canvas, SKRect tile, bool hover, SKColor accent)
         => DrawGearAt(canvas, GearRect(tile), hover, accent);
 
+    private static readonly SKColor CloseDanger = new(0xE5, 0x4B, 0x4B);
+
     /// <summary>
-    /// Draws a close "×" at an arbitrary rectangle (footer status bar). Non-hover:
-    /// muted secondary ×. Hover: red rounded background with a white × — the
-    /// universal close affordance, legible on both dark and light themes.
+    /// Draws a close "×" at an arbitrary rectangle (footer status bar). Always
+    /// shows a subtle red tint; hover intensifies to a filled red background with
+    /// a white × — visually distinct from the gear icon next to it.
     /// </summary>
     public void DrawCloseAt(SKCanvas canvas, SKRect r, bool hover)
     {
-        if (hover)
-        {
-            using var bg = new SKRoundRect(r, 6);
-            using var p = new SKPaint { Color = new SKColor(0xC4, 0x2B, 0x1C), Style = SKPaintStyle.Fill, IsAntialias = true };
-            canvas.DrawRoundRect(bg, p);
-        }
+        using var bg = new SKRoundRect(r, 6);
+        using var bgPaint = new SKPaint { Color = hover ? new SKColor(0xC4, 0x2B, 0x1C) : CloseDanger.WithAlpha(25), Style = SKPaintStyle.Fill, IsAntialias = true };
+        canvas.DrawRoundRect(bg, bgPaint);
 
-        float arm = r.Width * 0.24f; // half-length of each × arm
+        float arm = r.Width * 0.24f;
         float cx = r.MidX, cy = r.MidY;
         using var paint = new SKPaint
         {
-            Color = hover ? SKColors.White : _theme.TextSecondary,
+            Color = hover ? SKColors.White : CloseDanger.WithAlpha(180),
             Style = SKPaintStyle.Stroke,
             StrokeWidth = 1.8f,
             StrokeCap = SKStrokeCap.Round,
@@ -520,6 +522,79 @@ public sealed partial class TileRenderer
             tooth.Close();
             canvas.DrawPath(tooth, paint);
         }
+    }
+
+    /// <summary>
+    /// Draws a "← Back" button for the per-tile settings pane — replaces the
+    /// close × so the user sees an unambiguous "go back" affordance.
+    /// </summary>
+    public void DrawBackButton(SKCanvas canvas, SKRect r, bool hover, SKColor accent)
+    {
+        using var rr = new SKRoundRect(r, 8);
+        using var p = new SKPaint
+        {
+            Color = hover ? TilePalette.Soft(accent) : _theme.TileBorder,
+            Style = SKPaintStyle.Fill,
+            IsAntialias = true,
+        };
+        canvas.DrawRoundRect(rr, p);
+
+        float cx = r.Left + 10;
+        float cy = r.MidY;
+        using var chev = new SKPaint { Color = hover ? accent : _theme.TextPrimary, Style = SKPaintStyle.Stroke, StrokeWidth = 1.8f, IsAntialias = true, StrokeCap = SKStrokeCap.Round };
+        canvas.DrawLine(cx + 4, cy - 4, cx - 2, cy, chev);
+        canvas.DrawLine(cx - 2, cy, cx + 4, cy + 4, chev);
+
+        using var tPaint = new SKPaint { Color = hover ? accent : _theme.TextPrimary, IsAntialias = true };
+        var tFont = CachedFont("Segoe UI Semibold", 12);
+        canvas.DrawText("Back", cx + 10, r.MidY + 4, tFont, tPaint);
+    }
+
+    /// <summary>
+    /// Draws a prominent "Done" button for the global settings pane — always
+    /// filled with the accent color so it's easy to find.
+    /// </summary>
+    public void DrawDoneButton(SKCanvas canvas, SKRect r, bool hover, SKColor accent)
+    {
+        using var rr = new SKRoundRect(r, 8);
+        using var p = new SKPaint
+        {
+            Color = hover ? accent : TilePalette.Soft(accent),
+            Style = SKPaintStyle.Fill,
+            IsAntialias = true,
+        };
+        canvas.DrawRoundRect(rr, p);
+        using var border = new SKPaint { Color = accent.WithAlpha(80), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
+        canvas.DrawRoundRect(rr, border);
+
+        using var tPaint = new SKPaint { Color = hover ? SKColors.White : accent, IsAntialias = true };
+        var tFont = CachedFont("Segoe UI Semibold", 13);
+        float tw = tFont.MeasureText("Done");
+        canvas.DrawText("Done", r.MidX - tw / 2, r.MidY + 5, tFont, tPaint);
+    }
+
+    /// <summary>
+    /// Draws a small tooltip bubble with <paramref name="text"/> centered above
+    /// <paramref name="anchorCenterX"/>, <paramref name="anchorTop"/>.
+    /// </summary>
+    public void DrawTooltip(SKCanvas canvas, string text, float anchorCenterX, float anchorTop, float maxRight)
+    {
+        var font = CachedFont("Segoe UI", 12);
+        float tw = font.MeasureText(text);
+        float padH = 8;
+        float bw = tw + padH * 2;
+        float h = 22;
+        float x = anchorCenterX - bw / 2;
+        if (x + bw > maxRight) x = maxRight - bw;
+        if (x < 0) x = 0;
+        float y = anchorTop - h - 4;
+
+        using var rr = new SKRoundRect(new SKRect(x, y, x + bw, y + h), 5);
+        using var bg = new SKPaint { Color = new SKColor(0x2D, 0x2D, 0x2D), Style = SKPaintStyle.Fill, IsAntialias = true };
+        canvas.DrawRoundRect(rr, bg);
+
+        using var tPaint = new SKPaint { Color = SKColors.White, IsAntialias = true };
+        canvas.DrawText(text, x + padH, y + 15, font, tPaint);
     }
 
     /// <summary>
@@ -688,9 +763,11 @@ public sealed partial class TileRenderer
         double axis = NextAxisMax(v.AxisKey, dataMax, isBytes);
         v.SparkRange = (0, axis);
         v.SparkMaxLabel = isBytes ? Format.Rate((ulong)axis, v.Settings.UnitMode, v.Kind) : $"{axis:0}%";
-        // Reference line pinned at 90% of the axis on every tile: near the top,
-        // never wanders, level across tiles.
-        v.SparkTypicalMax = axis * 0.9;
+        // Reference line: the global alert threshold — cross it and the tile
+        // enters alert state. Percent graphs only: rate graphs (disk/net
+        // throughput) have no usage percentage to threshold against. Hidden
+        // when alerts are off or the threshold is above the current axis.
+        v.SparkAlertThreshold = ThresholdEnabled && !isBytes ? ThresholdPercent : 0;
     }
 
     // Candidate axis ceilings for percentage tiles (pinned 0..100).
@@ -760,7 +837,16 @@ public sealed partial class TileRenderer
         float y0 = rect.Top + pad;
         float w = rect.Width - pad * 2;
         float h = rect.Height - pad * 2;
-        if (w <= 0 || h <= 0) return;
+
+        // Top band reserved for the axis-max label (and the dual-graph legend):
+        // the curve maps the axis ceiling to just UNDER the text, so a value at
+        // the max can never poke above its own label, and the dashed typical-max
+        // reference lands clearly below the text inside the curve area instead
+        // of co-lining with it (which read as "the dashed line IS the 100% mark").
+        const float TopBand = 16f;
+        float plotTop = y0 + TopBand;
+        float plotH = h - TopBand;
+        if (w <= 0 || plotH <= 0) return;
 
         double range = v.SparkRange.Max - v.SparkRange.Min;
         if (range <= 0) range = 1;
@@ -780,7 +866,7 @@ public sealed partial class TileRenderer
             {
                 double norm = (val - v.SparkRange.Min) / range;
                 norm = Math.Max(0, Math.Min(1, norm));
-                return y0 + h - (float)norm * h;
+                return plotTop + plotH - (float)norm * plotH;
             }
 
             // Judder-free edges: samples land and expire only once per second,
@@ -836,11 +922,11 @@ public sealed partial class TileRenderer
         // Smooth path (Catmull-Rom -> cubic Bézier; control points clamped to
         // the plot rect so the curve never overshoots).
         using var path = new SKPath();
-        BuildSmoothPath(path, pts, y0, h);
+        BuildSmoothPath(path, pts, plotTop, plotH);
 
         using var fillPath = new SKPath(path);
-        fillPath.LineTo(pts[m - 1].X, y0 + h);
-        fillPath.LineTo(pts[0].X, y0 + h);
+        fillPath.LineTo(pts[m - 1].X, plotTop + plotH);
+        fillPath.LineTo(pts[0].X, plotTop + plotH);
         fillPath.Close();
 
         using var fillPaint = new SKPaint
@@ -856,7 +942,7 @@ public sealed partial class TileRenderer
         if (v.SparkHistory2 != null && v.SparkHistory2.Count >= 2)
         {
             using var path2 = new SKPath();
-            BuildSmoothPath(path2, MapPoints(v.SparkHistory2), y0, h);
+            BuildSmoothPath(path2, MapPoints(v.SparkHistory2), plotTop, plotH);
             using var line2Paint = new SKPaint
             {
                 Color = v.Accent2,
@@ -892,20 +978,18 @@ public sealed partial class TileRenderer
             canvas.DrawText(v.SparkLegendB, lx + 13, ly, legFont, legPaint);
         }
 
-        // Dashed "typical max" reference line (95th pct, nice-rounded). Sits
-        // inside the current axis range; genuine spikes break above it.
-        if (v.SparkTypicalMax > v.SparkRange.Min)
+        // Dashed alert-threshold line: the level that turns the tile red when
+        // the curve crosses it, drawn in alert red at its true value position
+        // inside the curve area. Hidden when alerts are off or the threshold is
+        // above the current axis ceiling (off-scale would misplace it).
+        if (v.SparkAlertThreshold > v.SparkRange.Min && v.SparkAlertThreshold <= v.SparkRange.Max)
         {
-            double tnorm = (v.SparkTypicalMax - v.SparkRange.Min) / range;
+            double tnorm = (v.SparkAlertThreshold - v.SparkRange.Min) / range;
             tnorm = Math.Max(0, Math.Min(1, tnorm));
-            float ty = y0 + h - (float)tnorm * h;
-            // Keep the dashes clear of the top text band (legend + axis label
-            // occupy ~y0..y0+12); nudge down when the reference sits near the top.
-            float tyMin = y0 + 14;
-            if (ty < tyMin && tyMin < y0 + h) ty = tyMin;
+            float ty = plotTop + plotH - (float)tnorm * plotH;
             using var dash = new SKPaint
             {
-                Color = _theme.TextSecondary.WithAlpha(90), // ~35% opacity
+                Color = AlertColor.WithAlpha(110), // ~43% opacity
                 Style = SKPaintStyle.Stroke,
                 StrokeWidth = 1,
                 IsAntialias = true,
@@ -915,7 +999,7 @@ public sealed partial class TileRenderer
         }
 
         // Faint mid gridline (half the axis max), kept subtle and inside the pad.
-        float midY = y0 + h / 2;
+        float midY = plotTop + plotH / 2;
         using var gridPaint = new SKPaint
         {
             Color = _theme.TileBorder.WithAlpha(70),
@@ -925,7 +1009,8 @@ public sealed partial class TileRenderer
         };
         canvas.DrawLine(x0, midY, x0 + w, midY, gridPaint);
 
-        // Max-value axis label in the graph's top-right corner (muted).
+        // Max-value axis label in the graph's top-right corner, inside the
+        // reserved top band (muted).
         if (!string.IsNullOrEmpty(v.SparkMaxLabel))
         {
             using var lblPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
@@ -1099,7 +1184,7 @@ public sealed partial class TileRenderer
         var custom = new SKRect(x, y, midX - 4, y + PaneButtonH);
         var reset = new SKRect(midX + 4, y, right, y + PaneButtonH);
 
-        var close = new SKRect(p.Right - 28, p.Top + 6, p.Right - 8, p.Top + 26);
+        var close = new SKRect(p.Right - 82, p.Top + 6, p.Right - PanePad, p.Top + 26);
 
         return new PaneLayout
         {
@@ -1136,7 +1221,7 @@ public sealed partial class TileRenderer
         canvas.DrawText("Customize", x, y + 12, headerFont, headerPaint);
         y += PaneHeaderGap;
 
-        DrawCloseGlyph(canvas, layout.Close, hoverClose);
+        DrawBackButton(canvas, layout.Close, hoverClose, v.Accent);
 
         var labels = new[] { ("Title", v.Settings.ShowTitle), ("Usage %", v.Settings.ShowBigValue),
             ("Bar", v.Settings.ShowUsageBar), ("Graph", v.Settings.ShowSparkline), ("Details", v.Settings.ShowSecondaryLine) };
@@ -1261,20 +1346,21 @@ public sealed partial class TileRenderer
         float leftW = (rx - lx - colGap) / 2;
         float rightX = lx + leftW + colGap;
 
-        var close = new SKRect(p.Right - 28, p.Top + 6, p.Right - 8, p.Top + 26);
+        var close = new SKRect(p.Right - 72, p.Top + 6, p.Right - 14, p.Top + 26);
 
         const float rowH = 30;   // switch / stepper row height
-        const float segH = 26;    // segmented control height
+        const float segH = 26;
         const float segLabelH = 16;
-        const float segRowH = segLabelH + 4 + segH; // label + gap + control
-        const float toggleGap = 3;
+        const float segRowH = segLabelH + 4 + segH;
+        const float rowGap = 3;
+        const float sectionGap = 8;
 
         // ---- left column ----
-        float ly = p.Top + pad + 20; // below the "Settings" header
-        var launchToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
-        var kioskToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
-        var alwaysOnTopToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
-        var thresholdToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
+        float ly = p.Top + pad + 22; // below the "Settings" header
+        var launchToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + rowGap;
+        var kioskToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + rowGap;
+        var alwaysOnTopToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + sectionGap;
+        var thresholdToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + rowGap;
 
         // Threshold stepper: STACKED within the left column — "Alert at" label
         // on its own line, the [-] [value] [+] group right-aligned on the line
@@ -1291,7 +1377,7 @@ public sealed partial class TileRenderer
         float leftBottom = ly + rowH;
 
         // ---- right column ----
-        float ry = p.Top + pad + 20;
+        float ry = p.Top + pad + 22;
 
         // Theme: 6 themes arranged in 2 rows of 3, since labels like "Transparent"
         // and "Frost Light" need more horizontal space than a single row of 6 allows.
@@ -1302,14 +1388,14 @@ public sealed partial class TileRenderer
         var themeSegs = new List<SKRect>(6);
         themeSegs.AddRange(themeRow1);
         themeSegs.AddRange(themeRow2);
-        ry += segLabelH + 4 + segH + 4 + segH + toggleGap;
+        ry += segLabelH + 4 + segH + 4 + segH + rowGap;
 
-        var graphSpanSegs = SegmentRects(rightX, rx, ry + segLabelH, segH, 4); ry += segRowH + toggleGap;
-        var decimalsSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segRowH + toggleGap;
+        var graphSpanSegs = SegmentRects(rightX, rx, ry + segLabelH, segH, 4); ry += segRowH + rowGap;
+        var decimalsSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segRowH + rowGap;
         float rightBottom = ry;
 
         // ---- Tiles section: full width below both columns ----
-        float tilesTop = Math.Max(leftBottom, rightBottom) + 12;
+        float tilesTop = Math.Max(leftBottom, rightBottom) + sectionGap;
         float chipY = tilesTop + 16 + 4; // header line + gap
         const float chipH = 24;
         var chipKinds = new[] { TileKind.Cpu, TileKind.Ram, TileKind.Gpu, TileKind.Disk, TileKind.Network };
@@ -1369,20 +1455,23 @@ public sealed partial class TileRenderer
         float rx = p.Right - pad;
 
         using var headerPaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        var headerFont = CachedFont("Segoe UI Semibold", 15);
-        canvas.DrawText("Settings", lx, p.Top + pad + 14, headerFont, headerPaint);
-        DrawCloseGlyph(canvas, layout.Close, hoverClose);
+        var headerFont = CachedFont("Segoe UI Semibold", 18);
+        canvas.DrawText("Settings", lx, p.Top + pad + 16, headerFont, headerPaint);
+        DrawDoneButton(canvas, layout.Close, hoverClose, _theme.Accent);
 
         const float rowH = 30;
         const float segLabelH = 16;
 
-        // ---- left column: toggles + threshold stepper ----
+        // ── General ────────────────────────────────────────────
         DrawRowLabel(canvas, layout.LaunchToggle.Left, layout.LaunchToggle.Top, rowH, "Launch at startup");
         DrawSwitch(canvas, layout.LaunchToggle, config.LaunchAtStartup, _theme.Accent);
         DrawRowLabel(canvas, layout.KioskToggle.Left, layout.KioskToggle.Top, rowH, "Kiosk mode");
         DrawSwitch(canvas, layout.KioskToggle, config.KioskMode, _theme.Accent);
         DrawRowLabel(canvas, layout.AlwaysOnTopToggle.Left, layout.AlwaysOnTopToggle.Top, rowH, "Always on top");
         DrawSwitch(canvas, layout.AlwaysOnTopToggle, config.AlwaysOnTop, _theme.Accent);
+
+        // ── Alerts ─────────────────────────────────────────────
+        DrawSectionDivider(canvas, lx, layout.ThresholdToggle.Top - 4, "ALERTS");
         DrawRowLabel(canvas, layout.ThresholdToggle.Left, layout.ThresholdToggle.Top, rowH, "Threshold alert");
         DrawSwitch(canvas, layout.ThresholdToggle, config.ThresholdEnabled, _theme.Accent);
 
@@ -1392,7 +1481,9 @@ public sealed partial class TileRenderer
         DrawStepper(canvas, layout.ThresholdMinus, layout.ThresholdValue, layout.ThresholdPlus,
             $"{config.ThresholdPercent:0}%", _theme.Accent);
 
-        // ---- right column: Theme segmented ----
+        // ── Display ────────────────────────────────────────────
+        float displayX = layout.ThemeSegments[0].Left;
+        DrawSectionDivider(canvas, displayX, layout.ThemeSegments[0].Top - segLabelH - 2, "DISPLAY");
         DrawRowLabel(canvas, layout.ThemeSegments[0].Left, layout.ThemeSegments[0].Top - segLabelH, segLabelH, "Theme");
         string[] themeLabels = { "Midnight", "Obsidian", "Daybreak", "Transparent", "Frost Light", "Frost Dark" };
         int themeIdx = IndexOfTheme(currentTheme.Name);
@@ -1409,11 +1500,8 @@ public sealed partial class TileRenderer
         string[] decLabels = { "0", "1", "2" };
         DrawSegments(canvas, layout.DecimalsSegments, decLabels, config.ValueDecimals, _theme.Accent);
 
-        // ---- Tiles section: full width ----
-        using var secPaint = new SKPaint { Color = _theme.TextSecondary, IsAntialias = true };
-        var secFont = CachedFont("Segoe UI Semibold", 12);
-        float tilesHeaderY = layout.TileChips[0].Top - 4 - 13;
-        canvas.DrawText("Tiles", lx, tilesHeaderY + 13, secFont, secPaint);
+        // ── Tiles ──────────────────────────────────────────────
+        DrawSectionDivider(canvas, lx, layout.TileChips[0].Top - 4, "TILES");
         var chipKinds = new[] { TileKind.Cpu, TileKind.Ram, TileKind.Gpu, TileKind.Disk, TileKind.Network };
         for (int i = 0; i < chipKinds.Length; i++)
             DrawChip(canvas, layout.TileChips[i], chipKinds[i], config.Tile(chipKinds[i]).Enabled);
@@ -1449,8 +1537,18 @@ public sealed partial class TileRenderer
     {
         using var paint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
         var font = CachedFont("Segoe UI", 13);
-        // Vertically center the label within the row height (baseline ~ 0.72 * h).
         canvas.DrawText(text, x, y + rowH * 0.72f, font, paint);
+    }
+
+    /// <summary>
+    /// Draws a section divider — uppercase label matching the row-label font
+    /// size — to visually separate logical groups in the settings pane.
+    /// </summary>
+    private void DrawSectionDivider(SKCanvas canvas, float x, float y, string label)
+    {
+        using var paint = new SKPaint { Color = _theme.TextSecondary.WithAlpha(150), IsAntialias = true };
+        var font = CachedFont("Segoe UI Semibold", 12);
+        canvas.DrawText(label, x, y, font, paint);
     }
 
     private void DrawSwitch(SKCanvas canvas, SKRect row, bool on, SKColor accent)
@@ -1659,8 +1757,8 @@ public sealed class TileVisual
     public string? SecondaryText { get; set; }
     public IReadOnlyList<(DateTimeOffset, double)>? SparkHistory { get; set; }
     public (double Min, double Max) SparkRange { get; set; }
-    /// <summary>Typical-max reference value (95th pct, nice-rounded), drawn as a dashed line. Hidden with ShowSparkline.</summary>
-    public double SparkTypicalMax { get; set; }
+    /// <summary>Alert-threshold reference value (percent graphs only), drawn as a dashed red line at its true value position. 0 = hidden (alerts off, rate graph, or off-scale). Hidden with ShowSparkline.</summary>
+    public double SparkAlertThreshold { get; set; }
     /// <summary>Human-readable top-of-axis value (e.g. "25%" or "1.2 MB/s"), drawn inside the graph. Hidden with ShowSparkline.</summary>
     public string? SparkMaxLabel { get; set; }
     /// <summary>Graph time window in seconds — the renderer time-maps the sparkline's X axis with it.</summary>
@@ -1707,7 +1805,7 @@ public sealed class TileVisual
         const float DetailsLineH = 18f;     // vertical allowance for the details row
         const float GapAboveDetails = 6f;   // bar -> details text
         const float GapBelowDetails = 6f;   // details text -> graph
-        const float GraphFloor = 40f;       // hide the graph below this height
+        const float GraphFloor = 56f;       // hide the graph below this height (16px top band + ~40px curve)
 
         float availAfterBar = bottom - Y;
 

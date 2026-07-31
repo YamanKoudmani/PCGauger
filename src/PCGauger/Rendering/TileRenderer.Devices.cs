@@ -40,20 +40,35 @@ public sealed partial class TileRenderer
     private const float PanePickerMax = 6;
     public const float GlobalPaneExtendedHeight = 392;
 
-    // ---- full-window global pane geometry (BUG 2) ----
-    // The extended pane is now derived from the WHOLE client rect (with margins)
-    // instead of a fixed 392px centered card, so it fills the active window and
-    // scales. Row heights / spacing scale with the available body height; text
-    // sizes stay fixed so everything remains legible from a ~420x560 floating
-    // window up to the 800x480 kiosk. GlobalPaneBottomReserve keeps the card
-    // clear of the 28px footer strip.
-    private const float GlobalPaneMargin = 16;
-    private const float GlobalPaneBottomReserve = 36; // footer (28) + breathing room
+    // ---- full-window global pane geometry (SCROLLABLE redesign) ----
+    // The pane fills near-edge with a pinned header (title + Done) and pinned
+    // footer (version). Between them is a clipped scroll viewport holding all
+    // sections at a FIXED rhythm — when the window is too short the content
+    // scrolls instead of clipping away. Nothing is scaled or made to disappear.
+    private const float GlobalPaneMargin = 6;
+    private const float GlobalPaneBottomReserve = 32;
     private const float GlobalPanePad = 16;
-    private const float GlobalPaneHeaderH = 34;
-    private const float GlobalPaneNominalBodyH = 360; // body height at which scale == 1
-    private const float GlobalPaneMinScale = 0.8f;
-    private const float GlobalPaneMaxScale = 1.2f;
+
+    // Header / footer chrome.
+    private const float GP_TitleH = 30;               // title band height (title baseline inside)
+    private const float GP_HeaderRuleGapAbove = 10;   // title band -> header rule
+    private const float GP_ViewportTopPad = 12;       // header rule -> viewport top
+    private const float GP_ViewportBottomPad = 8;     // viewport bottom -> footer rule
+    private const float GP_FooterH = 34;              // footer strip holding the Done button
+
+    // Fixed spacing rhythm (px). No scaling — overflow becomes a scrollbar.
+    private const float GP_HeadingBaseline = 14;      // section-top -> heading baseline
+    private const float GP_HeadingToContent = 10;     // heading baseline -> first control top
+    private const float GP_SectionGap = 22;           // previous section bottom -> next section top
+    private const float GP_RowH = 32;                 // toggle / management row height
+    private const float GP_RowGap = 8;                // gap between rows
+    private const float GP_GroupGap = 14;             // gap between labeled control groups
+    private const float GP_LabelH = 18;               // "Theme"/"Alert at" label line height
+    private const float GP_ElemGap = 6;               // label -> control gap
+    private const float GP_SegH = 30;                 // segmented-control height
+    private const float GP_ChipH = 30;                // tile chip height
+    private const float GP_ScrollW = 10;              // scrollbar width
+    private const float GP_TwoColMinWidth = 520;      // viewport width for 2-column body
 
     /// <summary>
     /// One selectable device as presented in a dropdown/picker. Built by the
@@ -113,6 +128,10 @@ public sealed partial class TileRenderer
         public int PickerScrollIndex;
         public int PickerHoverIndex = -1;
         public IReadOnlyList<DeviceItem> PickerItems = Array.Empty<DeviceItem>();
+
+        /// <summary>Vertical scroll offset (px) of the pane's content viewport.
+        /// Owned by the caller; the renderer clamps it to the valid range.</summary>
+        public float Scroll;
     }
 
     // ===================================================================
@@ -504,188 +523,208 @@ public sealed partial class TileRenderer
     // ===================================================================
 
     /// <summary>
-    /// Computes the global pane hit rects with the redesigned Tiles section:
-    /// CPU/RAM keep toggle chips; Disk/GPU/Network become management rows
-    /// (label + count + an "Add" button) and an optional device picker. The original
-    /// rects (toggles, theme, threshold, etc.) are preserved so the rest of the
-    /// pane draws and hit-tests identically. When <paramref name="state"/> is
-    /// null this returns the exact original layout.
+    /// Computes the global pane hit rects for the redesigned SCROLLABLE pane:
+    /// a pinned header (title + Done) and footer (version) frame a clipped
+    /// content viewport that scrolls when the window is too short to show all
+    /// sections. Sections lay out at a FIXED rhythm — nothing is ever scaled to
+    /// oblivion or clipped away; overflow becomes a scrollbar, not disappearing
+    /// content. Wide windows use a two-column body, narrow collapse to one.
+    /// CPU/RAM keep toggle chips; Disk/GPU/Network are management rows
+    /// (label + count + Add) with an optional device-picker overlay.
+    /// When <paramref name="state"/> is null this returns the original layout.
     /// </summary>
     public GlobalPaneLayout? ComputeGlobalPaneLayout(SKRect client, GlobalPaneDeviceState? state = null)
     {
         if (state is null)
             return ComputeGlobalPaneLayout(client);
 
-        // Derive the pane from the whole client rect (with margins). This makes
-        // the pane fill the active window — from a small floating window up to
-        // the 800x480 kiosk — instead of a fixed 392px centered card.
+        // ── Pane fills near-edge with tight margins, above the footer ──
         float margin = GlobalPaneMargin;
         float x = client.Left + margin;
         float y = client.Top + margin;
         float width = client.Width - 2 * margin;
         float height = client.Height - margin - GlobalPaneBottomReserve;
-        if (width < 300) width = 300;
-        if (height < 320) height = 320;
-        // Clamp inside the client so it can never spill off-window.
-        if (x < client.Left + 8) x = client.Left + 8;
-        if (y < client.Top + 8) y = client.Top + 8;
         if (x + width > client.Right - 8) width = client.Right - 8 - x;
         if (y + height > client.Bottom - 8) height = client.Bottom - 8 - y;
-        if (width < 300 || height < 300) return null;
+        if (width < 280 || height < 240) return null; // impossibly small
 
         var p = new SKRect(x, y, x + width, y + height);
         float pad = GlobalPanePad;
         float lx = p.Left + pad;
         float rx = p.Right - pad;
-        float colGap = 16;
-        float leftW = (rx - lx - colGap) / 2;
-        float rightX = lx + leftW + colGap;
 
-        var close = new SKRect(p.Right - 74, p.Top + 8, p.Right - GlobalPanePad, p.Top + 30);
+        // ── Pinned header + footer; the scroll viewport sits between them ──
+        float titleTop = p.Top + pad;
+        float headerRuleY = titleTop + GP_TitleH + GP_HeaderRuleGapAbove;
 
-        // Scale row heights / spacing with the available body height so the
-        // layout breathes on large panes and compresses on small ones. Text
-        // sizes stay fixed (legibility).
-        float bodyTop = p.Top + pad + GlobalPaneHeaderH;
-        float bodyBottom = p.Bottom - pad;
-        float bodyH = Math.Max(1, bodyBottom - bodyTop);
-        float scale = Math.Clamp(bodyH / GlobalPaneNominalBodyH, GlobalPaneMinScale, GlobalPaneMaxScale);
+        // Footer holds the Done button (bottom-right). The footer band runs from
+        // the rule (just under the viewport) to the card's inner bottom edge.
+        float footerTop = p.Bottom - pad - GP_FooterH;
+        var viewport = new SKRect(lx, headerRuleY + GP_ViewportTopPad, rx, footerTop - GP_ViewportBottomPad);
 
-        float rowH = 30 * scale;
-        float segH = 26 * scale;
-        float segLabelH = 16;
-        float smallGap = 4 * scale;
-        float toggleGap = 4 * scale;
-        float sectionGap = 16 * scale;
-        float chipH = 26 * scale;
+        // Done button vertically centered in the footer band, which runs from
+        // the rule (just under the viewport) to the card's inner bottom edge.
+        float doneH = 26;
+        float footerAreaTop = viewport.Bottom + GP_ViewportBottomPad;
+        float footerAreaBottom = p.Bottom - 6; // inner card bottom
+        float doneTop = footerAreaTop + (footerAreaBottom - footerAreaTop - doneH) / 2;
+        var close = new SKRect(rx - 88, doneTop, rx, doneTop + doneH);
 
-        // ---- left column: toggles + threshold stepper ----
-        float ly = bodyTop;
-        var launchToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
-        var kioskToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
-        var alwaysOnTopToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
-        var thresholdToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
+        // Reserve a scrollbar lane on the RIGHT edge; the content column stops
+        // short of it so controls never slide under the thumb.
+        float contentRight = viewport.Right - GP_ScrollW - 8;
 
-        float minusW = 26 * scale, valW = 44 * scale, sgap = 6 * scale;
-        float plusX = lx + leftW - minusW;
+        // Clamp + record scroll.
+        float scroll = Math.Max(0, state.Scroll);
+
+        // Content rect: full unclipped column laid out in CONTENT space (origin
+        // at the viewport top), then shifted up by scroll for hit-testing/draw.
+        float cx = viewport.Left;
+        float cw = contentRight - cx;
+        float contentTop = viewport.Top - scroll;
+
+        // One vs two body columns based on width.
+        bool twoCol = cw >= GP_TwoColMinWidth;
+        float colGap = 20;
+        float colW = twoCol ? (cw - colGap) / 2 : cw;
+        float leftX = cx;
+        float rightX = twoCol ? cx + colW + colGap : cx;
+
+        float bodyTop = contentTop;
+
+        // ── Section: GENERAL (left/top) ──
+        float generalHeadingY = bodyTop + GP_HeadingBaseline;
+        float gy = generalHeadingY + GP_HeadingToContent;
+        var launchToggle = new SKRect(leftX, gy, leftX + colW, gy + GP_RowH); gy += GP_RowH + GP_RowGap;
+        var kioskToggle = new SKRect(leftX, gy, leftX + colW, gy + GP_RowH); gy += GP_RowH + GP_RowGap;
+        var alwaysOnTopToggle = new SKRect(leftX, gy, leftX + colW, gy + GP_RowH); gy += GP_RowH + GP_RowGap;
+        float generalBottom = gy;
+
+        // ── Section: ALERTS (always in the LEFT column, under GENERAL) ──
+        float ay = generalBottom + GP_SectionGap;
+        float alertsHeadingY = ay + GP_HeadingBaseline;
+        float ay2 = alertsHeadingY + GP_HeadingToContent;
+        float alertsX = leftX;
+        float alertsColW = colW;
+        var thresholdToggle = new SKRect(alertsX, ay2, alertsX + alertsColW, ay2 + GP_RowH); ay2 += GP_RowH + GP_RowGap;
+        // "Alert at" label line + right-aligned stepper.
+        ay2 += GP_LabelH + GP_ElemGap;
+        float minusW = 34, valW = 52, sgap = 6;
+        float plusX = alertsX + alertsColW - minusW;
         float valX = plusX - sgap - valW;
         float minusX = valX - sgap - minusW;
-        ly += segLabelH + smallGap;
-        var thresholdMinus = new SKRect(minusX, ly, minusX + minusW, ly + rowH);
-        var thresholdValue = new SKRect(valX, ly, valX + valW, ly + rowH);
-        var thresholdPlus = new SKRect(plusX, ly, plusX + minusW, ly + rowH);
-        float leftBottom = ly + rowH;
+        var thresholdMinus = new SKRect(minusX, ay2, minusX + minusW, ay2 + GP_RowH);
+        var thresholdValue = new SKRect(valX, ay2, valX + valW, ay2 + GP_RowH);
+        var thresholdPlus = new SKRect(plusX, ay2, plusX + minusW, ay2 + GP_RowH);
+        ay2 += GP_RowH;
+        float leftBottom = ay2;
 
-        // ---- right column: theme / graph span / decimals segments ----
-        float ry = bodyTop;
-        // Theme: 6 themes in 2 rows of 3.
-        float themeRow1Y = ry + segLabelH + smallGap;
-        var themeRow1 = SegmentRects(rightX, rx, themeRow1Y, segH, 3);
-        float themeRow2Y = themeRow1Y + segH + smallGap;
-        var themeRow2 = SegmentRects(rightX, rx, themeRow2Y, segH, 3);
+        // ── Section: DISPLAY (right column when wide, else under ALERTS) ──
+        float dy = twoCol ? contentTop : leftBottom + GP_SectionGap;
+        float displayHeadingY = dy + GP_HeadingBaseline;
+        float dy2 = displayHeadingY + GP_HeadingToContent;
+        float displayX = twoCol ? rightX : leftX;
+        float displayW = colW;
+        // Theme label + 2 rows of 3.
+        float themeRow1Y = dy2 + GP_LabelH + GP_ElemGap;
+        var themeRow1 = SegmentRects(displayX, displayX + displayW, themeRow1Y, GP_SegH, 3);
+        float themeRow2Y = themeRow1Y + GP_SegH + GP_ElemGap;
+        var themeRow2 = SegmentRects(displayX, displayX + displayW, themeRow2Y, GP_SegH, 3);
         var themeSegs = new List<SKRect>(6);
         themeSegs.AddRange(themeRow1);
         themeSegs.AddRange(themeRow2);
-        ry += segLabelH + smallGap + segH + smallGap + segH + toggleGap;
+        dy2 = themeRow2Y + GP_SegH + GP_GroupGap;
+        // Graph span.
+        var graphSpanSegs = SegmentRects(displayX, displayX + displayW, dy2 + GP_LabelH + GP_ElemGap, GP_SegH, 4);
+        dy2 += GP_LabelH + GP_ElemGap + GP_SegH + GP_GroupGap;
+        // Decimals.
+        var decimalsSegs = SegmentRects(displayX, displayX + displayW, dy2 + GP_LabelH + GP_ElemGap, GP_SegH);
+        dy2 += GP_LabelH + GP_ElemGap + GP_SegH;
+        float displayBottom = dy2;
 
-        var graphSpanSegs = SegmentRects(rightX, rx, ry + segLabelH, segH, 4); ry += segLabelH + smallGap + segH + toggleGap;
-        var decimalsSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segLabelH + smallGap + segH + toggleGap;
-        float rightBottom = ry;
+        float bodyBottom = twoCol ? Math.Max(leftBottom, displayBottom) : displayBottom;
 
-        // ---- Tiles section (full width below both columns) ----
-        float tilesTop = Math.Max(leftBottom, rightBottom) + sectionGap;
-
-        // CPU + RAM toggle chips (two side-by-side).
-        float chipY = tilesTop + segLabelH + smallGap;
-        float chipGap = 6 * scale;
-        float chipW = (rx - lx - chipGap) / 2;
+        // ── Section: TILES (full content-column width) ──
+        float tilesHeadingY = bodyBottom + GP_SectionGap + GP_HeadingBaseline;
+        float ty = tilesHeadingY + GP_HeadingToContent;
+        float chipGap = 8;
+        float chipW = (cw - chipGap) / 2;
         var chips = new List<SKRect>(2)
         {
-            new SKRect(lx, chipY, lx + chipW, chipY + chipH),
-            new SKRect(lx + chipW + chipGap, chipY, lx + 2 * chipW + chipGap, chipY + chipH),
+            new SKRect(cx, ty, cx + chipW, ty + GP_ChipH),
+            new SKRect(cx + chipW + chipGap, ty, cx + 2 * chipW + chipGap, ty + GP_ChipH),
         };
+        ty += GP_ChipH + GP_GroupGap;
 
-        // Disk / GPU / Network management rows.
-        float rowY = chipY + chipH + 8 * scale;
-        float addRowH = PaneAddRowH * scale;
         var addRows = new List<SKRect>(3);
         var addButtons = new List<SKRect>(3);
-        var addKinds = new[] { TileKind.Disk, TileKind.Gpu, TileKind.Network };
-        for (int i = 0; i < addKinds.Length; i++)
+        for (int i = 0; i < 3; i++)
         {
-            addRows.Add(new SKRect(lx, rowY, rx, rowY + addRowH));
-            addButtons.Add(new SKRect(rx - PaneAddBtnW * scale, rowY + 2 * scale, rx, rowY + addRowH - 2 * scale));
-            rowY += addRowH + 4 * scale;
+            addRows.Add(new SKRect(cx, ty, cx + cw, ty + GP_RowH));
+            addButtons.Add(new SKRect(cx + cw - 72, ty + 3, cx + cw, ty + GP_RowH - 3));
+            ty += GP_RowH + GP_RowGap;
         }
-        // Space for the version label below the last add row.
-        rowY += 16 * scale;
+        // Total stacked height, measured from the top of the FIRST section to
+        // the bottom of the LAST row. The first section begins at contentTop
+        // (its heading baseline is GP_HeadingBaseline below that, INSIDE the
+        // measured span), so contentTop IS the top — subtract nothing extra.
+        // Ending exactly at the last row's bottom keeps the scroll range tight
+        // (no dead blank band past the end).
+        float contentHeight = (ty - GP_RowGap) - contentTop;
 
-        // ---- Picker (lays out INSIDE the pane; previously it could spill past
-        // the pane bottom, which caused a real click bug). It is positioned just
-        // below the add rows and clamped to stay within the card. ----
+        // ── Scrollbar (track + thumb) on the viewport's right edge ──
+        float maxScroll = Math.Max(0, contentHeight - viewport.Height);
+        bool canScroll = maxScroll > 1;
+        SKRect track = SKRect.Empty, thumb = SKRect.Empty;
+        if (canScroll)
+        {
+            track = new SKRect(viewport.Right - GP_ScrollW, viewport.Top, viewport.Right, viewport.Bottom);
+            float thumbH = Math.Max(28, viewport.Height * viewport.Height / contentHeight);
+            float travel = viewport.Height - thumbH;
+            float tyThumb = viewport.Top + travel * Math.Min(1, scroll / maxScroll);
+            thumb = new SKRect(track.Left + 2, tyThumb, track.Right - 2, tyThumb + thumbH);
+        }
+
+        // ── Picker: a fixed overlay centered over the Tiles section, clamped ──
         SKRect picker = SKRect.Empty;
         var pickerItems = new List<SKRect>();
         SKRect pickerUp = SKRect.Empty, pickerDown = SKRect.Empty, pickerClose = SKRect.Empty, pickerEmpty = SKRect.Empty;
         if (state.ActivePickerKind.HasValue)
         {
             int total = state.PickerItems.Count;
-            float maxBottom = p.Bottom - pad;
-            // Highest the picker may rise (just below the header) when the pane
-            // is too short to fit it below the Tiles section — it then overlays
-            // the columns rather than spilling past the card.
-            float minTop = p.Top + pad + GlobalPaneHeaderH + 4;
-
-            // Local helper: popover height for a given visible count. Scroll
-            // arrows appear whenever not every item fits in the viewport.
-            float PkH(int vis, bool scroll) => 22 + vis * PanePickerItemH + (scroll ? 22 : 0) + (total == 0 ? 26 : 0);
-
+            float maxBottom = viewport.Bottom - 6;
+            float minTop = viewport.Top + 6;
+            float PkH(int vis, bool scr) => 26 + vis * PanePickerItemH + (scr ? 22 : 0) + (total == 0 ? 26 : 0);
             int visible = Math.Min((int)PanePickerMax, Math.Max(total, 1));
             bool scrollNeeded = total > visible;
             float pkH = PkH(visible, scrollNeeded);
-            float pkTop = rowY + 4 * scale;
-
-            // Clamp inside the card: never below the bottom edge, and prefer
-            // sitting below the Tiles section.
-            pkTop = Math.Min(pkTop, maxBottom - pkH);
-            pkTop = Math.Max(pkTop, tilesTop);
-
-            // Short pane + tall picker: shrink the visible count (adding scroll
-            // arrows) so the whole popover fits. If it still can't sit below the
-            // Tiles section, let it rise to overlay the columns — but it must
-            // NEVER extend past the card's bottom edge.
+            float pkTop = Math.Min(viewport.Top + 40, maxBottom - pkH);
+            pkTop = Math.Max(pkTop, minTop);
             if (pkTop + pkH > maxBottom)
             {
-                float chrome = 22 /*header*/ + 22 /*overflow arrows*/ + (total == 0 ? 26 : 0);
-                float avail = maxBottom - minTop - chrome;
-                int fit = (int)Math.Floor(avail / PanePickerItemH);
-                if (fit < 1) fit = 1;
+                float chrome = 26 + 22 + (total == 0 ? 26 : 0);
+                int fit = Math.Max(1, (int)Math.Floor((maxBottom - minTop - chrome) / PanePickerItemH));
                 visible = Math.Min(visible, fit);
                 scrollNeeded = total > visible;
                 pkH = PkH(visible, scrollNeeded);
                 pkTop = Math.Max(minTop, maxBottom - pkH);
             }
-
-            picker = new SKRect(lx - 2, pkTop, rx + 2, pkTop + pkH);
-            float ix = lx;
-            float iRight = rx;
-            float iy = pkTop + 22;
-            if (total == 0)
-            {
-                pickerEmpty = new SKRect(ix, iy, iRight, iy + 22);
-            }
+            picker = new SKRect(lx + 8, pkTop, rx - 8, pkTop + pkH);
+            float iy = pkTop + 26;
+            if (total == 0) pickerEmpty = new SKRect(picker.Left + 8, iy, picker.Right - 8, iy + 22);
             else
             {
-                int scroll = Math.Max(0, Math.Min(state.PickerScrollIndex, Math.Max(0, total - (int)PanePickerMax)));
-                int vis = Math.Min(visible, total - scroll);
+                int pscroll = Math.Max(0, Math.Min(state.PickerScrollIndex, Math.Max(0, total - (int)PanePickerMax)));
+                int vis = Math.Min(visible, total - pscroll);
                 for (int i = 0; i < vis; i++)
-                    pickerItems.Add(new SKRect(ix, iy + i * PanePickerItemH, iRight, iy + i * PanePickerItemH + PanePickerItemH));
+                    pickerItems.Add(new SKRect(picker.Left + 8, iy + i * PanePickerItemH, picker.Right - 8, iy + i * PanePickerItemH + PanePickerItemH));
                 if (scrollNeeded)
                 {
-                    pickerUp = new SKRect(ix, iy + vis * PanePickerItemH, iRight, iy + vis * PanePickerItemH + 11);
-                    pickerDown = new SKRect(ix, picker.Bottom - 11, iRight, picker.Bottom);
+                    pickerUp = new SKRect(picker.Left + 8, iy + vis * PanePickerItemH, picker.Right - 8, iy + vis * PanePickerItemH + 11);
+                    pickerDown = new SKRect(picker.Left + 8, picker.Bottom - 11, picker.Right - 8, picker.Bottom);
                 }
             }
-            pickerClose = new SKRect(picker.Right - 24, picker.Top + 4, picker.Right - 6, picker.Top + 22);
+            pickerClose = new SKRect(picker.Right - 26, picker.Top + 4, picker.Right - 8, picker.Top + 22);
         }
 
         return new GlobalPaneLayout
@@ -702,9 +741,7 @@ public sealed partial class TileRenderer
             ThresholdPlus = thresholdPlus,
             GraphSpanSegments = graphSpanSegs,
             DecimalsSegments = decimalsSegs,
-            // CPU + RAM chips only (Disk/GPU/Net are now rows).
             TileChips = chips,
-            // new members:
             AddRows = addRows,
             AddButtons = addButtons,
             Picker = picker,
@@ -713,6 +750,13 @@ public sealed partial class TileRenderer
             PickerDown = pickerDown,
             PickerClose = pickerClose,
             PickerEmpty = pickerEmpty,
+            Viewport = viewport,
+            ContentHeight = contentHeight,
+            Scroll = scroll,
+            MaxScroll = maxScroll,
+            CanScroll = canScroll,
+            ScrollThumb = thumb,
+            ScrollTrack = track,
         };
     }
 
@@ -730,94 +774,130 @@ public sealed partial class TileRenderer
         }
 
         var p = layout.Pane;
+        var vp = layout.Viewport;
+
+        // Drop-shadow behind the card (drawn first so the blur never bleeds over).
+        var shadow = SKRect.Inflate(p, 4, 4);
+        using (var shadowPaint = new SKPaint
+        {
+            Color = new SKColor(0x00, 0x00, 0x00, 60),
+            Style = SKPaintStyle.Fill,
+            IsAntialias = true,
+            MaskFilter = SKMaskFilter.CreateBlur(SKBlurStyle.Normal, 8),
+        })
+        {
+            canvas.DrawRoundRect(new SKRoundRect(shadow, 14), shadowPaint);
+        }
+
+        // Card chrome: rounded background + border (shadow lives behind it).
         using var round = new SKRoundRect(p, 14);
         using var bg = new SKPaint { Color = _theme.PaneBackground, Style = SKPaintStyle.Fill, IsAntialias = true };
         canvas.DrawRoundRect(round, bg);
-        using var border = new SKPaint { Color = _theme.TileBorder, Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
-        canvas.DrawRoundRect(round, border);
 
         float pad = GlobalPanePad;
         float lx = p.Left + pad;
         float rx = p.Right - pad;
 
-        using var headerPaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        var headerFont = TileRenderer.CachedFont("Segoe UI Semibold", 18);
-        canvas.DrawText("Settings", lx, p.Top + pad + 16, headerFont, headerPaint);
-        DrawDoneButton(canvas, layout.Close, hoverClose, _theme.Accent);
+        // ══ SCROLLING CONTENT — clipped to the viewport, translated by scroll ══
+        canvas.Save();
+        canvas.ClipRect(vp);
+        canvas.Translate(0, -layout.Scroll);
 
-        // Recover the same scale the layout pass used, so label baselines line
-        // up with the (scaled) control rects.
-        float bodyH = (p.Bottom - p.Top) - 2 * pad - GlobalPaneHeaderH;
-        float scale = Math.Clamp(bodyH / GlobalPaneNominalBodyH, GlobalPaneMinScale, GlobalPaneMaxScale);
-        float rowH = 30 * scale;
-        float segLabelH = 16;
-        float leftW = layout.LaunchToggle.Width;
-
-        // ── General ────────────────────────────────────────────
-        DrawSectionDivider(canvas, lx, layout.LaunchToggle.Top - 4, "GENERAL");
-        DrawRowLabel(canvas, layout.LaunchToggle.Left, layout.LaunchToggle.Top, rowH, "Launch at startup");
+        // ── GENERAL ──
+        float generalHeadingY = layout.LaunchToggle.Top - GP_HeadingToContent;
+        DrawSectionDivider(canvas, layout.LaunchToggle.Left, layout.LaunchToggle.Right, generalHeadingY, "GENERAL");
+        DrawRowLabel(canvas, layout.LaunchToggle.Left, layout.LaunchToggle.Top, GP_RowH, "Launch at startup");
         DrawSwitch(canvas, layout.LaunchToggle, config.LaunchAtStartup, _theme.Accent);
-        DrawRowLabel(canvas, layout.KioskToggle.Left, layout.KioskToggle.Top, rowH, "Kiosk mode");
+        DrawRowLabel(canvas, layout.KioskToggle.Left, layout.KioskToggle.Top, GP_RowH, "Kiosk mode");
         DrawSwitch(canvas, layout.KioskToggle, config.KioskMode, _theme.Accent);
-        DrawRowLabel(canvas, layout.AlwaysOnTopToggle.Left, layout.AlwaysOnTopToggle.Top, rowH, "Always on top");
+        DrawRowLabel(canvas, layout.AlwaysOnTopToggle.Left, layout.AlwaysOnTopToggle.Top, GP_RowH, "Always on top");
         DrawSwitch(canvas, layout.AlwaysOnTopToggle, config.AlwaysOnTop, _theme.Accent);
 
-        // ── Alerts ─────────────────────────────────────────────
-        DrawSectionDivider(canvas, lx, layout.ThresholdToggle.Top - 4, "ALERTS");
-        DrawRowLabel(canvas, layout.ThresholdToggle.Left, layout.ThresholdToggle.Top, rowH, "Threshold alert");
+        // ── ALERTS ──
+        float alertsHeadingY = layout.ThresholdToggle.Top - GP_HeadingToContent;
+        DrawSectionDivider(canvas, layout.ThresholdToggle.Left, layout.ThresholdToggle.Right, alertsHeadingY, "ALERTS");
+        DrawRowLabel(canvas, layout.ThresholdToggle.Left, layout.ThresholdToggle.Top, GP_RowH, "Threshold alert");
         DrawSwitch(canvas, layout.ThresholdToggle, config.ThresholdEnabled, _theme.Accent);
-
-        DrawRowLabel(canvas, lx, layout.ThresholdMinus.Top - segLabelH, segLabelH, "Alert at");
+        DrawRowLabel(canvas, layout.ThresholdToggle.Left, layout.ThresholdMinus.Top - GP_ElemGap - GP_LabelH, GP_LabelH, "Alert at");
         DrawStepper(canvas, layout.ThresholdMinus, layout.ThresholdValue, layout.ThresholdPlus,
             $"{config.ThresholdPercent:0}%", _theme.Accent);
 
-        // ── Display ────────────────────────────────────────────
+        // ── DISPLAY ──
+        float displayHeadingY = layout.ThemeSegments[0].Top - GP_LabelH - GP_ElemGap - GP_HeadingToContent;
         float displayX = layout.ThemeSegments[0].Left;
-        DrawSectionDivider(canvas, displayX, layout.ThemeSegments[0].Top - segLabelH - 2, "DISPLAY");
-        DrawRowLabel(canvas, layout.ThemeSegments[0].Left, layout.ThemeSegments[0].Top - segLabelH, segLabelH, "Theme");
+        float displayRight = layout.ThemeSegments[^1].Right;
+        DrawSectionDivider(canvas, displayX, displayRight, displayHeadingY, "DISPLAY");
+        DrawRowLabel(canvas, displayX, layout.ThemeSegments[0].Top - GP_ElemGap - GP_LabelH, GP_LabelH, "Theme");
         string[] themeLabels = { "Midnight", "Obsidian", "Daybreak", "Transparent", "Frost Light", "Frost Dark" };
         int themeIdx = IndexOfTheme(currentTheme.Name);
         DrawSegments(canvas, layout.ThemeSegments, themeLabels, themeIdx, _theme.Accent);
-
-        DrawRowLabel(canvas, layout.GraphSpanSegments[0].Left, layout.GraphSpanSegments[0].Top - segLabelH, segLabelH, "Graph span");
+        DrawRowLabel(canvas, displayX, layout.GraphSpanSegments[0].Top - GP_ElemGap - GP_LabelH, GP_LabelH, "Graph span");
         string[] spanLabels = { "30s", "1m", "5m", "10m" };
         int spanIdx = GraphSpanIndex(config.GraphWindowSeconds);
         DrawSegments(canvas, layout.GraphSpanSegments, spanLabels, spanIdx, _theme.Accent);
-
-        DrawRowLabel(canvas, layout.DecimalsSegments[0].Left, layout.DecimalsSegments[0].Top - segLabelH, segLabelH, "Decimals");
+        DrawRowLabel(canvas, displayX, layout.DecimalsSegments[0].Top - GP_ElemGap - GP_LabelH, GP_LabelH, "Decimals");
         string[] decLabels = { "0", "1", "2" };
         DrawSegments(canvas, layout.DecimalsSegments, decLabels, config.ValueDecimals, _theme.Accent);
 
-        // ── Tiles ──────────────────────────────────────────────
-        DrawSectionDivider(canvas, lx, layout.TileChips[0].Top - 4, "TILES");
-
-        // CPU + RAM toggle chips.
+        // ── TILES ──
+        float tilesHeadingY = layout.TileChips[0].Top - GP_HeadingToContent;
+        DrawSectionDivider(canvas, lx, layout.AddRows[0].Right, tilesHeadingY, "TILES");
         DrawChip(canvas, layout.TileChips[0], TileKind.Cpu, config.Tile(TileKind.Cpu).Enabled);
         DrawChip(canvas, layout.TileChips[1], TileKind.Ram, config.Tile(TileKind.Ram).Enabled);
-
-        // Disk / GPU / Network management rows.
         var addKinds = new[] { TileKind.Disk, TileKind.Gpu, TileKind.Network };
-        for (int i = 0; i < addKinds.Length; i++)
+        for (int i = 0; i < layout.AddRows.Count; i++)
         {
             TileKind kind = addKinds[i];
             DrawAddRow(canvas, layout.AddRows[i], layout.AddButtons[i], kind, state.CountFor(kind), hoverAddButton == i, _theme.Accent);
         }
 
-        // Version label pinned to the bottom of the settings pane.
-        // Application.ProductVersion is the AssemblyInformationalVersion, which
-        // the SDK appends "+<commit-sha>" to — show just the version number.
+        canvas.Restore(); // end scrolling content
+
+        // ══ SCROLLBAR (outside the translated clip, on the viewport edge) ══
+        if (layout.CanScroll)
+        {
+            using var trackP = new SKPaint { Color = _theme.TileBorder.WithAlpha(40), Style = SKPaintStyle.Fill, IsAntialias = true };
+            canvas.DrawRoundRect(new SKRoundRect(layout.ScrollTrack, 4), trackP);
+            using var thumbP = new SKPaint { Color = _theme.TextSecondary.WithAlpha(120), Style = SKPaintStyle.Fill, IsAntialias = true };
+            canvas.DrawRoundRect(new SKRoundRect(layout.ScrollThumb, 3), thumbP);
+        }
+
+        // ══ PINNED HEADER — title + version (top-right) + rule (over the content) ══
+        using (var headBg = new SKPaint { Color = _theme.PaneBackground, Style = SKPaintStyle.Fill })
+            canvas.DrawRect(new SKRect(p.Left, p.Top, p.Right, vp.Top), headBg);
+        float titleTop = p.Top + pad;
+        using var headerPaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
+        var headerFont = TileRenderer.CachedFont("Segoe UI Semibold", 20);
+        canvas.DrawText("Settings", lx, titleTop + 21, headerFont, headerPaint);
+
+        // Version label in the header, top-right, baseline-aligned with the title.
         using var verPaint = new SKPaint { Color = _theme.TextSecondary.WithAlpha(160), IsAntialias = true };
         var verFont = TileRenderer.CachedFont("Segoe UI", 11);
         string ver = Application.ProductVersion;
         int plus = ver.IndexOf('+');
         if (plus > 0) ver = ver.Substring(0, plus);
-        string verText = $"PCGauger v{ver}";
+        string verText = $"v{ver}";
         float verW = verFont.MeasureText(verText);
-        canvas.DrawText(verText, p.Right - pad - verW, p.Bottom - pad - 4, verFont, verPaint);
+        canvas.DrawText(verText, rx - verW, titleTop + 21, verFont, verPaint);
 
-        // Picker overlay (clamped inside the pane by the layout pass).
+        float headerRuleY = titleTop + GP_TitleH + GP_HeaderRuleGapAbove;
+        using (var rulePaint = new SKPaint { Color = _theme.TextSecondary.WithAlpha(50), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true })
+            canvas.DrawLine(lx, headerRuleY, rx, headerRuleY, rulePaint);
+
+        // ══ PINNED FOOTER — rule + Done button (bottom-right) ══
+        using (var footBg = new SKPaint { Color = _theme.PaneBackground, Style = SKPaintStyle.Fill })
+            canvas.DrawRect(new SKRect(p.Left, vp.Bottom, p.Right, p.Bottom), footBg);
+        using (var frule = new SKPaint { Color = _theme.TextSecondary.WithAlpha(50), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true })
+            canvas.DrawLine(lx, vp.Bottom + GP_ViewportBottomPad, rx, vp.Bottom + GP_ViewportBottomPad, frule);
+        DrawDoneButton(canvas, layout.Close, hoverClose, _theme.Accent);
+
+        // ══ Picker overlay (drawn last, clamped inside the pane) ══
         if (state.ActivePickerKind.HasValue)
             DrawPicker(canvas, layout, state, _theme.Accent, hoverPickerItem);
+
+        // Card border last so it stays crisp over everything.
+        using var border = new SKPaint { Color = _theme.TileBorder, Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
+        canvas.DrawRoundRect(round, border);
     }
 
     private void DrawAddRow(SKCanvas canvas, SKRect row, SKRect btn, TileKind kind, int count, bool hoverBtn, SKColor accent)

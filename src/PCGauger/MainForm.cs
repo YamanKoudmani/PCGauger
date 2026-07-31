@@ -137,6 +137,7 @@ public sealed class MainForm : Form
         _surface.MouseDown += OnSurfaceMouseDown;
         _surface.MouseUp += OnSurfaceMouseUp;
         _surface.MouseLeave += OnSurfaceMouseLeave;
+        _surface.MouseWheel += OnSurfaceMouseWheel;
         Controls.Add(_surface);
         KeyPreview = true; // so Escape can cancel an in-progress drag
 
@@ -883,6 +884,20 @@ public sealed class MainForm : Form
         _surface.Invalidate();
     }
 
+    /// <summary>Mouse-wheel scrolling of the global settings pane's content
+    /// viewport. The pane scrolls only when the cursor is over it and it actually
+    /// has overflow; the offset is clamped to the valid range.</summary>
+    private void OnSurfaceMouseWheel(object? sender, MouseEventArgs e)
+    {
+        if (!_globalPaneOpen) return;
+        var g = GlobalPaneLayout();
+        if (g == null || !g.CanScroll) return;
+        if (!g.Viewport.Contains(e.Location.X, e.Location.Y) && !g.ScrollTrack.Contains(e.Location.X, e.Location.Y)) return;
+        float delta = -e.Delta / 3f; // ~40px per notch
+        _globalDeviceState.Scroll = Math.Clamp(_globalDeviceState.Scroll + delta, 0, g.MaxScroll);
+        _surface.Invalidate();
+    }
+
     /// <summary>Computes the insertion slot for the dragged tile from the cursor
     /// position against the current grid cells. Uses a nearest-cell rule with a
     /// midpoint split: the cell under the cursor decides before/after by which
@@ -955,7 +970,7 @@ public sealed class MainForm : Form
         _globalPaneOpen = !_globalPaneOpen;
         _hoverGlobalClose = false;
         _globalHoverRow = -1;
-        if (!_globalPaneOpen) ClosePicker();
+        if (!_globalPaneOpen) { ClosePicker(); _globalDeviceState.Scroll = 0; }
         _surface.Invalidate();
     }
 

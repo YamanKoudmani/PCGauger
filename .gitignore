@@ -15,5 +15,9 @@ Desktop.ini
 
 publish/
 *.zip
+
+## Working files — never commit
+CLAUDE.md
+performance-report.html
 # Extracted self-contained release folders (e.g. PCGauger-v2.0.0-win-x64/)
 PCGauger-v*-win-x64/

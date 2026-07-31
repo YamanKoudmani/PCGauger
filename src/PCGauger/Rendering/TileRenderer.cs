@@ -551,26 +551,33 @@ public sealed partial class TileRenderer
     }
 
     /// <summary>
-    /// Draws a prominent "Done" button for the global settings pane — always
-    /// filled with the accent color so it's easy to find.
+    /// Draws the "Done" primary action for the global settings pane: a solid
+    /// accent fill with a crisp accent ring and dark label — prominent and
+    /// confident, but classy (no neon halo). Hover brightens slightly.
     /// </summary>
     public void DrawDoneButton(SKCanvas canvas, SKRect r, bool hover, SKColor accent)
     {
         using var rr = new SKRoundRect(r, 8);
-        using var p = new SKPaint
-        {
-            Color = hover ? accent : TilePalette.Soft(accent),
-            Style = SKPaintStyle.Fill,
-            IsAntialias = true,
-        };
+        SKColor fill = hover ? Lighten(accent, 1.12f) : accent;
+        using var p = new SKPaint { Color = fill, Style = SKPaintStyle.Fill, IsAntialias = true };
         canvas.DrawRoundRect(rr, p);
-        using var border = new SKPaint { Color = accent.WithAlpha(80), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
+        // Crisp 1px ring in a slightly lighter accent — definition, not glow.
+        using var border = new SKPaint { Color = Lighten(accent, 1.3f).WithAlpha(200), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
         canvas.DrawRoundRect(rr, border);
 
-        using var tPaint = new SKPaint { Color = hover ? SKColors.White : accent, IsAntialias = true };
+        // Dark text on the solid accent, like the tile chips.
+        using var tPaint = new SKPaint { Color = new SKColor(0x12, 0x16, 0x1C), IsAntialias = true };
         var tFont = CachedFont("Segoe UI Semibold", 13);
         float tw = tFont.MeasureText("Done");
         canvas.DrawText("Done", r.MidX - tw / 2, r.MidY + 5, tFont, tPaint);
+    }
+
+    /// <summary>Scales a color's RGB toward white by <paramref name="k"/> (1 =
+    /// unchanged, &gt;1 lighter), clamped to 255 — for hover/border tints.</summary>
+    private static SKColor Lighten(SKColor c, float k)
+    {
+        byte L(byte v) => (byte)Math.Min(255, (int)(v * k));
+        return new SKColor(L(c.Red), L(c.Green), L(c.Blue), c.Alpha);
     }
 
     /// <summary>
@@ -1268,10 +1275,9 @@ public sealed partial class TileRenderer
 
     // ---- global settings pane ----
 
+    // Legacy constants kept for API compatibility; the layout function now
+    // fills near-edge rather than centering a fixed 400×300 card.
     public const float GlobalPaneWidth = 400;
-    // Two-column layout height: header + (4 toggles + stepper) in the taller
-    // left column + full-width Tiles section. Deliberately < 284px so the pane
-    // fits a 300px-tall window (client.Height - 16).
     public const float GlobalPaneHeight = 300;
 
     /// <summary>All on-screen hit rects of the open global settings pane.</summary>
@@ -1311,6 +1317,22 @@ public sealed partial class TileRenderer
         public SKRect PickerClose { get; init; } = SKRect.Empty;
         /// <summary>Picker empty-state text hit rect (when no devices remain).</summary>
         public SKRect PickerEmpty { get; init; } = SKRect.Empty;
+
+        // ---- scroll-viewport members (scrollable global pane) ----
+        /// <summary>The scrollable content viewport (between the pinned header and footer).</summary>
+        public SKRect Viewport { get; init; } = SKRect.Empty;
+        /// <summary>Total height of the (unclipped) content, for scrollbar range.</summary>
+        public float ContentHeight { get; init; }
+        /// <summary>Current scroll offset (px) the caller passed in — echoed back so the draw routine matches.</summary>
+        public float Scroll { get; init; }
+        /// <summary>Maximum scroll (ContentHeight − Viewport.Height, clamped ≥ 0).</summary>
+        public float MaxScroll { get; init; }
+        /// <summary>True when content is taller than the viewport (scrollbar shown).</summary>
+        public bool CanScroll { get; init; }
+        /// <summary>Scrollbar thumb hit rect (empty when !CanScroll).</summary>
+        public SKRect ScrollThumb { get; init; } = SKRect.Empty;
+        /// <summary>Scrollbar track rect (empty when !CanScroll).</summary>
+        public SKRect ScrollTrack { get; init; } = SKRect.Empty;
     }
 
     /// <summary>
@@ -1327,16 +1349,17 @@ public sealed partial class TileRenderer
     /// </summary>
     public GlobalPaneLayout? ComputeGlobalPaneLayout(SKRect client)
     {
-        float width = Math.Min(GlobalPaneWidth, client.Width - 16);
-        if (width < 280) width = 280;
-        float height = GlobalPaneHeight;
-        float x = client.Left + (client.Width - width) / 2;
-        float y = client.Top + (client.Height - height) / 2 - 6;
+        // ── Pane fills near-edge (tight 6px margins) ──
+        float margin = 6;
+        float x = client.Left + margin;
+        float y = client.Top + margin;
+        float width = client.Width - 2 * margin;
+        float height = client.Height - margin - 32; // 32px bottom reserve (footer is 28)
         if (x < client.Left + 8) x = client.Left + 8;
         if (y < client.Top + 8) y = client.Top + 8;
-        if (x + width > client.Right - 8) x = client.Right - 8 - width;
-        if (y + height > client.Bottom - 8) y = client.Bottom - 8 - height;
-        if (width > client.Width - 16 || height > client.Height - 16) return null;
+        if (x + width > client.Right - 8) width = client.Right - 8 - x;
+        if (y + height > client.Bottom - 8) height = client.Bottom - 8 - y;
+        if (width < 280 || height < 280) return null;
 
         var p = new SKRect(x, y, x + width, y + height);
         float pad = 14;
@@ -1346,58 +1369,69 @@ public sealed partial class TileRenderer
         float leftW = (rx - lx - colGap) / 2;
         float rightX = lx + leftW + colGap;
 
-        var close = new SKRect(p.Right - 72, p.Top + 6, p.Right - 14, p.Top + 26);
+        // Done button: positioned in the header band, below the title baseline.
+        var close = new SKRect(p.Right - 72, p.Top + 22, p.Right - 14, p.Top + 44);
 
-        const float rowH = 30;   // switch / stepper row height
+        // ── Spacing scale (4/8/12/20/28 rhythm) ──
+        const float sectionGap = 20;        // gap from prior content bottom to heading baseline
+        const float headingBelowGap = 16;   // gap from heading baseline to first control top
+        const float toggleGap = 4;          // between toggle rows
+        const float segLabelH = 16;         // label height for theme/graph/etc (fixed — text size)
+        const float elemGap = 4;            // small gap between label and segment row
+        const float rowH = 30;              // toggle / stepper row height
         const float segH = 26;
-        const float segLabelH = 16;
-        const float segRowH = segLabelH + 4 + segH;
-        const float rowGap = 3;
-        const float sectionGap = 8;
+        const float chipH = 24;
 
-        // ---- left column ----
-        float ly = p.Top + pad + 22; // below the "Settings" header
-        var launchToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + rowGap;
-        var kioskToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + rowGap;
-        var alwaysOnTopToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + sectionGap;
-        var thresholdToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + rowGap;
+        // Header: title at pad+14, rule at pad+30
+        float headerRuleY = p.Top + pad + 30;
+        float firstSectionY = headerRuleY + sectionGap; // GENERAL heading baseline
 
-        // Threshold stepper: STACKED within the left column — "Alert at" label
-        // on its own line, the [-] [value] [+] group right-aligned on the line
-        // below (mirrors the right column's segmented rows). This makes overlap
-        // with the label impossible at any column width.
+        // ── Left column: GENERAL + ALERTS ──
+        float ly = firstSectionY + headingBelowGap; // first control (Launch toggle)
+
+        var launchToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
+        var kioskToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
+        var alwaysOnTopToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
+
+        // ALERTS heading: sectionGap above the last toggle's bottom.
+        float alertsHeadingY = alwaysOnTopToggle.Bottom + sectionGap;
+        ly = alertsHeadingY + headingBelowGap;
+
+        var thresholdToggle = new SKRect(lx, ly, lx + leftW, ly + rowH); ly += rowH + toggleGap;
+
+        // Threshold stepper: STACKED — "Alert at" label on its own line,
+        // [-] [value] [+] group right-aligned on the line below.
         float minusW = 26, valW = 42, sgap = 6;
         float plusX = lx + leftW - minusW;
         float valX = plusX - sgap - valW;
         float minusX = valX - sgap - minusW;
-        ly += segLabelH + 4; // label line (no control on it)
+        ly += segLabelH + elemGap; // "Alert at" label line
         var thresholdMinus = new SKRect(minusX, ly, minusX + minusW, ly + rowH);
         var thresholdValue = new SKRect(valX, ly, valX + valW, ly + rowH);
         var thresholdPlus = new SKRect(plusX, ly, plusX + minusW, ly + rowH);
         float leftBottom = ly + rowH;
 
-        // ---- right column ----
-        float ry = p.Top + pad + 22;
+        // ── Right column: DISPLAY ──
+        float ry = firstSectionY + headingBelowGap; // first control below DISPLAY heading
 
-        // Theme: 6 themes arranged in 2 rows of 3, since labels like "Transparent"
-        // and "Frost Light" need more horizontal space than a single row of 6 allows.
-        float themeRow1Y = ry + segLabelH + 4;
+        // Theme: 6 themes in 2 rows of 3.
+        float themeRow1Y = ry + segLabelH + elemGap;
         var themeRow1 = SegmentRects(rightX, rx, themeRow1Y, segH, 3);
-        float themeRow2Y = themeRow1Y + segH + 4;
+        float themeRow2Y = themeRow1Y + segH + elemGap;
         var themeRow2 = SegmentRects(rightX, rx, themeRow2Y, segH, 3);
         var themeSegs = new List<SKRect>(6);
         themeSegs.AddRange(themeRow1);
         themeSegs.AddRange(themeRow2);
-        ry += segLabelH + 4 + segH + 4 + segH + rowGap;
+        ry += segLabelH + elemGap + segH + elemGap + segH + toggleGap;
 
-        var graphSpanSegs = SegmentRects(rightX, rx, ry + segLabelH, segH, 4); ry += segRowH + rowGap;
-        var decimalsSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segRowH + rowGap;
+        var graphSpanSegs = SegmentRects(rightX, rx, ry + segLabelH, segH, 4); ry += segLabelH + elemGap + segH + toggleGap;
+        var decimalsSegs = SegmentRects(rightX, rx, ry + segLabelH, segH); ry += segLabelH + elemGap + segH + toggleGap;
         float rightBottom = ry;
 
-        // ---- Tiles section: full width below both columns ----
-        float tilesTop = Math.Max(leftBottom, rightBottom) + sectionGap;
-        float chipY = tilesTop + 16 + 4; // header line + gap
-        const float chipH = 24;
+        // ── Tiles section: full width below both columns ──
+        float tilesSectionY = Math.Max(leftBottom, rightBottom) + sectionGap; // TILES heading baseline
+        float chipY = tilesSectionY + headingBelowGap; // first chip top
+
         var chipKinds = new[] { TileKind.Cpu, TileKind.Ram, TileKind.Gpu, TileKind.Disk, TileKind.Network };
         int n = chipKinds.Length;
         float chipGap = 6;
@@ -1450,19 +1484,50 @@ public sealed partial class TileRenderer
         using var border = new SKPaint { Color = _theme.TileBorder, Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
         canvas.DrawRoundRect(round, border);
 
+        // Subtle drop-shadow behind the pane for surface distinction.
+        var shadow = SKRect.Inflate(p, 4, 4);
+        using (var shadowPaint = new SKPaint
+        {
+            Color = new SKColor(0x00, 0x00, 0x00, 60),
+            Style = SKPaintStyle.Fill,
+            IsAntialias = true,
+            MaskFilter = SKMaskFilter.CreateBlur(SKBlurStyle.Normal, 8),
+        })
+        {
+            canvas.DrawRoundRect(new SKRoundRect(shadow, 14), shadowPaint);
+        }
+
         float pad = 14;
         float lx = p.Left + pad;
         float rx = p.Right - pad;
 
+        // ── Header: title + Done button + rule ──
         using var headerPaint = new SKPaint { Color = _theme.TextPrimary, IsAntialias = true };
-        var headerFont = CachedFont("Segoe UI Semibold", 18);
+        var headerFont = CachedFont("Segoe UI Semibold", 20);
         canvas.DrawText("Settings", lx, p.Top + pad + 16, headerFont, headerPaint);
         DrawDoneButton(canvas, layout.Close, hoverClose, _theme.Accent);
 
+        // Header rule: spans full content width, separating header from body.
+        float headerRuleY = p.Top + pad + 30;
+        using (var rulePaint = new SKPaint
+        {
+            Color = _theme.TextSecondary.WithAlpha(50),
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1,
+            IsAntialias = true,
+        })
+        {
+            canvas.DrawLine(lx, headerRuleY, rx, headerRuleY, rulePaint);
+        }
+
         const float rowH = 30;
         const float segLabelH = 16;
+        const float headingBelowGap = 16; // matches non-device layout constant
+        const float elemGap = 4;
 
-        // ── General ────────────────────────────────────────────
+        // ── GENERAL ────────────────────────────────────────────
+        float generalHeadingY = layout.LaunchToggle.Top - headingBelowGap;
+        DrawSectionDivider(canvas, lx, rx, generalHeadingY, "GENERAL");
         DrawRowLabel(canvas, layout.LaunchToggle.Left, layout.LaunchToggle.Top, rowH, "Launch at startup");
         DrawSwitch(canvas, layout.LaunchToggle, config.LaunchAtStartup, _theme.Accent);
         DrawRowLabel(canvas, layout.KioskToggle.Left, layout.KioskToggle.Top, rowH, "Kiosk mode");
@@ -1470,20 +1535,23 @@ public sealed partial class TileRenderer
         DrawRowLabel(canvas, layout.AlwaysOnTopToggle.Left, layout.AlwaysOnTopToggle.Top, rowH, "Always on top");
         DrawSwitch(canvas, layout.AlwaysOnTopToggle, config.AlwaysOnTop, _theme.Accent);
 
-        // ── Alerts ─────────────────────────────────────────────
-        DrawSectionDivider(canvas, lx, layout.ThresholdToggle.Top - 4, "ALERTS");
+        // ── ALERTS ─────────────────────────────────────────────
+        float alertsHeadingY = layout.ThresholdToggle.Top - headingBelowGap;
+        DrawSectionDivider(canvas, lx, rx, alertsHeadingY, "ALERTS");
         DrawRowLabel(canvas, layout.ThresholdToggle.Left, layout.ThresholdToggle.Top, rowH, "Threshold alert");
         DrawSwitch(canvas, layout.ThresholdToggle, config.ThresholdEnabled, _theme.Accent);
 
-        // Threshold % stepper — label on its own line ABOVE the right-aligned
+        // Threshold % stepper — label on its own line above the right-aligned
         // [-] [value] [+] group (stacked, never beside it).
         DrawRowLabel(canvas, lx, layout.ThresholdMinus.Top - segLabelH, segLabelH, "Alert at");
         DrawStepper(canvas, layout.ThresholdMinus, layout.ThresholdValue, layout.ThresholdPlus,
             $"{config.ThresholdPercent:0}%", _theme.Accent);
 
-        // ── Display ────────────────────────────────────────────
+        // ── DISPLAY ────────────────────────────────────────────
         float displayX = layout.ThemeSegments[0].Left;
-        DrawSectionDivider(canvas, displayX, layout.ThemeSegments[0].Top - segLabelH - 2, "DISPLAY");
+        // heading baseline = firstSegmentTop - segLabelH - elemGap - headingBelowGap
+        float displayHeadingY = layout.ThemeSegments[0].Top - segLabelH - elemGap - headingBelowGap;
+        DrawSectionDivider(canvas, displayX, rx, displayHeadingY, "DISPLAY");
         DrawRowLabel(canvas, layout.ThemeSegments[0].Left, layout.ThemeSegments[0].Top - segLabelH, segLabelH, "Theme");
         string[] themeLabels = { "Midnight", "Obsidian", "Daybreak", "Transparent", "Frost Light", "Frost Dark" };
         int themeIdx = IndexOfTheme(currentTheme.Name);
@@ -1500,8 +1568,9 @@ public sealed partial class TileRenderer
         string[] decLabels = { "0", "1", "2" };
         DrawSegments(canvas, layout.DecimalsSegments, decLabels, config.ValueDecimals, _theme.Accent);
 
-        // ── Tiles ──────────────────────────────────────────────
-        DrawSectionDivider(canvas, lx, layout.TileChips[0].Top - 4, "TILES");
+        // ── TILES ──────────────────────────────────────────────
+        float tilesHeadingY = layout.TileChips[0].Top - headingBelowGap;
+        DrawSectionDivider(canvas, lx, rx, tilesHeadingY, "TILES");
         var chipKinds = new[] { TileKind.Cpu, TileKind.Ram, TileKind.Gpu, TileKind.Disk, TileKind.Network };
         for (int i = 0; i < chipKinds.Length; i++)
             DrawChip(canvas, layout.TileChips[i], chipKinds[i], config.Tile(chipKinds[i]).Enabled);
@@ -1541,14 +1610,45 @@ public sealed partial class TileRenderer
     }
 
     /// <summary>
-    /// Draws a section divider — uppercase label matching the row-label font
-    /// size — to visually separate logical groups in the settings pane.
+    /// Draws a section divider — uppercase label + a horizontal rule extending
+    /// to <paramref name="right"/> — to visually separate logical groups in the
+    /// settings pane with generous clear hierarchy.
     /// </summary>
-    private void DrawSectionDivider(SKCanvas canvas, float x, float y, string label)
+    private void DrawSectionDivider(SKCanvas canvas, float x, float right, float y, string label)
     {
-        using var paint = new SKPaint { Color = _theme.TextSecondary.WithAlpha(150), IsAntialias = true };
-        var font = CachedFont("Segoe UI Semibold", 12);
-        canvas.DrawText(label, x, y, font, paint);
+        // Small caps, wide-tracked, muted — a genuine "heading" tier that sits
+        // clearly BELOW the title but ABOVE the body rows, instead of reading as
+        // just another label at the same weight.
+        var font = CachedFont("Segoe UI Semibold", 11);
+        string spaced = LetterSpace(label);
+        using var paint = new SKPaint { Color = _theme.TextSecondary.WithAlpha(170), IsAntialias = true };
+        canvas.DrawText(spaced, x, y, font, paint);
+
+        // Horizontal rule beside the label, extending to the right content edge.
+        float tw = font.MeasureText(spaced);
+        float ruleX = x + tw + 12;
+        float ruleY = y - 4; // vertically centered on the small-caps x-height
+        if (ruleX < right - 16)
+        {
+            using var rulePaint = new SKPaint
+            {
+                Color = _theme.TextSecondary.WithAlpha(70),
+                Style = SKPaintStyle.Stroke,
+                StrokeWidth = 1,
+                IsAntialias = true,
+            };
+            canvas.DrawLine(ruleX, ruleY, right, ruleY, rulePaint);
+        }
+    }
+
+    /// <summary>Inserts a hair space between letters to fake letter-tracking —
+    /// makes the small-caps section headings read as a distinct, quieter tier.</summary>
+    private static string LetterSpace(string s)
+    {
+        if (string.IsNullOrEmpty(s) || s.Length < 2) return s;
+        var sb = new System.Text.StringBuilder(s.Length * 2);
+        foreach (var c in s) { sb.Append(c); sb.Append(' '); } // hair space
+        return sb.ToString();
     }
 
     private void DrawSwitch(SKCanvas canvas, SKRect row, bool on, SKColor accent)

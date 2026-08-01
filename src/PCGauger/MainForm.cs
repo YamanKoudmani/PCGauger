@@ -2605,8 +2605,8 @@ internal sealed class DetachedTileForm : Form
         int h = e.Info.Height;
         if (_theme.Backdrop == WindowBackdrop.Opaque)
         {
-            using (var bg = _theme.BackgroundPaint())
-                canvas.DrawRect(0, 0, w, h, bg);
+            var bg = _theme.BackgroundPaint(); // cached — do NOT dispose (shared with MainForm)
+            canvas.DrawRect(0, 0, w, h, bg);
         }
         else
         {

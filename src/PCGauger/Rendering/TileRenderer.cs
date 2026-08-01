@@ -630,8 +630,9 @@ public sealed partial class TileRenderer
     }
 
     /// <summary>
-    /// Draws the insertion indicator for a reorder: a chunky accent bar at the
-    /// leading edge of the target slot, plus a faint accent outline of that cell.
+    /// Draws the insertion indicator for a reorder: a chunky accent bar marking
+    /// the insertion boundary, plus a faint accent outline of the destination
+    /// cell. Between two same-row tiles the bar sits centered in the gap;
     /// <paramref name="insertAt"/> is in [0, rects.Count]; == Count means append
     /// at the end (right edge of the last cell).
     /// </summary>
@@ -650,6 +651,11 @@ public sealed partial class TileRenderer
         {
             cell = rects[insertAt];
             barX = cell.Left;
+            // Between two same-row tiles the bar marks the insertion boundary:
+            // center it in the gap instead of hugging the next tile's edge.
+            // Row-wrap insertions keep the leading-edge placement.
+            if (insertAt > 0 && rects[insertAt - 1].Bottom == cell.Bottom)
+                barX = (rects[insertAt - 1].Right + cell.Left) / 2f;
         }
 
         // Faint accent outline marking the destination cell.

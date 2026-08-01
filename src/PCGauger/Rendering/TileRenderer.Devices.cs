@@ -577,8 +577,11 @@ public sealed partial class TileRenderer
         // Clamp + record scroll.
         float scroll = Math.Max(0, state.Scroll);
 
-        // Content rect: full unclipped column laid out in CONTENT space (origin
-        // at the viewport top), then shifted up by scroll for hit-testing/draw.
+        // Content rect: the full unclipped column laid out in SCREEN space with
+        // its top already shifted up by scroll, so the same rects serve both
+        // drawing (clipped to the viewport) and hit-testing. No extra translate
+        // is applied at draw time — that would double-shift content and detach
+        // the tap targets from the drawn controls.
         float cx = viewport.Left;
         float cw = contentRight - cx;
         float contentTop = viewport.Top - scroll;
@@ -798,10 +801,11 @@ public sealed partial class TileRenderer
         float lx = p.Left + pad;
         float rx = p.Right - pad;
 
-        // ══ SCROLLING CONTENT — clipped to the viewport, translated by scroll ══
+        // ══ SCROLLING CONTENT — clipped to the viewport. The layout rects are
+        // already in screen space (shifted by scroll), so no translate: drawing
+        // and hit-testing must agree pixel-for-pixel. ══
         canvas.Save();
         canvas.ClipRect(vp);
-        canvas.Translate(0, -layout.Scroll);
 
         // ── GENERAL ──
         float generalHeadingY = layout.LaunchToggle.Top - GP_HeadingToContent;

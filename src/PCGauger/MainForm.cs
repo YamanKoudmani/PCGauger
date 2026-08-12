@@ -434,8 +434,8 @@ public sealed class MainForm : Form
 
     private SKRect GridArea()
     {
-        float gap = 12;
-        float bottom = ClientSize.Height - FooterHeight;
+        float gap = 10;
+        float bottom = ClientSize.Height - FooterHeight - gap;
         if (bottom < gap + 40) bottom = gap + 40;
         return new SKRect(gap, gap, ClientSize.Width - gap, bottom);
     }

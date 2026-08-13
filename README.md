@@ -4,7 +4,7 @@ A lightweight, Windows-native system metrics dashboard — built to sit on a sma
 
 Rendered with SkiaSharp on a WinForms host. Single `.exe`, runs unprivileged (`asInvoker`), negligible idle overhead.
 
-<img width="1186" height="553" alt="image" src="https://github.com/user-attachments/assets/ba2f836f-c6a1-4a41-872c-3093c2d260d3" />
+<img width="797" height="553" alt="image" src="https://github.com/user-attachments/assets/56650f65-60a9-4b70-a560-28cdaf7a7054" />
 
 ## Features
 
